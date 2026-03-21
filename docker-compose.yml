@@ -1,0 +1,60 @@
+# docker-compose.yml
+# ADR-005: Ollama runs as a sidecar service with model volume mounted.
+# scope.md §Docker: docker-compose up → indexes built, eval runs, results printed.
+# Target: docker-compose up → working demo in under 5 commands.
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Ollama sidecar — Mistral 7B descriptor generation + per-track explanations
+  # ADR-001: mistral:7b-instruct-q4_K_M via Ollama (~4.5GB)
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Pipeline service — data processing, index building, eval
+  # ---------------------------------------------------------------------------
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      # Data artifacts — never baked into image (scope.md §Docker)
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
+      - ./runs:/app/runs
+      - ./checkpoints:/app/checkpoints
+      - ./eval:/app/eval
+    environment:
+      # Ollama endpoint — points to sidecar service
+      - OLLAMA_BASE_URL=http://ollama:11434
+    env_file:
+      - .env   # SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, GENIUS_ACCESS_TOKEN
+    depends_on:
+      ollama:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo '=== Step 1: Build catalog ===' &&
+        python scripts/build_catalog.py --config config/config.yaml &&
+        echo '=== Step 2: Generate descriptors ===' &&
+        python scripts/generate_descriptors.py --config config/config.yaml &&
+        echo '=== Step 3: Build ChromaDB indexes ===' &&
+        python scripts/build_index.py --config config/config.yaml &&
+        echo '=== Step 4: Run evaluation ===' &&
+        python scripts/run_eval.py --config config/config.yaml --print-table
+      "
+
+volumes:
+  ollama_models:

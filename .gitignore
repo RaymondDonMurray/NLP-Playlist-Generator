@@ -1,0 +1,51 @@
+# Environment & secrets
+.env
+
+# Data artifacts — mounted as Docker volumes, never committed (ADR-005, scope.md §Docker)
+data/
+chroma_db/
+
+# TensorBoard logs — gitignored, referenced by run name in README (ADR-004)
+runs/
+
+# Model checkpoints — gitignored (CLAUDE.md)
+checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Parquet / Arrow artifacts
+*.parquet
+*.arrow
+
+# Evaluation outputs (generated, not committed unless intentional)
+eval/results.csv
+eval/baseline_metrics.json

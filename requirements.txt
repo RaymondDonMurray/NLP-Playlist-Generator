@@ -1,0 +1,57 @@
+# requirements.txt
+# Pinned to specific versions for reproducibility.
+# ADR-001: Model stack — sentence-transformers, ChromaDB, Ollama HTTP client.
+# Platform: Python 3.11, M1 Max (MPS backend).
+
+# ---------------------------------------------------------------------------
+# Core ML stack
+# ---------------------------------------------------------------------------
+sentence-transformers==3.4.1       # ADR-001: bge-base + cross-encoder; MPS backend
+torch==2.6.0                       # MPS backend for M1 Max
+transformers==4.50.0               # HuggingFace backbone for sentence-transformers
+
+# ---------------------------------------------------------------------------
+# Vector index
+# ---------------------------------------------------------------------------
+chromadb==0.6.3                    # ADR-002: Dual ChromaDB indexes
+
+# ---------------------------------------------------------------------------
+# Retrieval
+# ---------------------------------------------------------------------------
+rank-bm25==0.2.2                   # scope.md: BM25 over descriptor text
+
+# ---------------------------------------------------------------------------
+# Data pipeline
+# ---------------------------------------------------------------------------
+pandas==2.2.3                      # DataFrame operations, parquet I/O
+pyarrow==19.0.1                    # Parquet serialization backend
+rapidfuzz==3.12.1                  # scope.md §preprocessing: fuzzy join FMA→Spotify
+ftfy==6.3.1                        # failure_modes.md §1.2: lyrics Unicode fixing
+spotipy==2.25.1                    # scope.md: Spotify Web API client
+httpx==0.28.1                      # failure_modes.md §4.3: async Ollama client with timeout
+
+# ---------------------------------------------------------------------------
+# Config & schema
+# ---------------------------------------------------------------------------
+pydantic==2.11.1                   # ADR-006: config + data contracts via Pydantic v2
+pydantic-settings==2.8.2           # .env loading for API keys
+PyYAML==6.0.2                      # config.yaml loading
+
+# ---------------------------------------------------------------------------
+# Experiment tracking
+# ---------------------------------------------------------------------------
+tensorboard==2.19.0                # ADR-004: TensorBoard (no external accounts)
+
+# ---------------------------------------------------------------------------
+# Testing
+# ---------------------------------------------------------------------------
+pytest==8.3.5
+pytest-cov==6.1.0
+pytest-asyncio==0.25.3             # Async tests for Genius crawler
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+numpy==2.2.4
+tqdm==4.67.1                       # Progress bars for batch operations
+python-dotenv==1.1.0               # .env loading

@@ -1,0 +1,82 @@
+# config/config.yaml
+# Single source of truth for all tunable parameters.
+# ADR-006: Single YAML config loaded at each entry point, parsed by Pydantic.
+# Rule: every number that affects pipeline behavior or model quality lives here,
+# not as a magic constant in source code.
+#
+# API keys (Spotify, Genius) live in .env ONLY — never here.
+
+pipeline:
+  checkpoint_interval: 100        # tracks per checkpoint parquet file (ADR-002)
+  fuzzy_match_threshold: 85       # rapidFuzz title similarity threshold (scope.md §preprocessing)
+  artist_match_threshold: 70      # two-pass artist similarity (failure_modes.md §1.1)
+  suspicious_artist_threshold: 40 # flag-not-drop zone for artist similarity
+  max_lyrics_tokens: 200          # truncate lyrics before LLM prompt (scope.md)
+  min_lyrics_tokens: 20           # below this → treat as missing (failure_modes.md §1.2)
+  speechiness_max: 0.5            # filter podcasts/comedy miscategorized in FMA (failure_modes.md §1.3)
+  duration_ms_min: 30000          # filter intros/outros/stingers (failure_modes.md §1.3)
+  dedup_similarity_threshold: 0.98  # post-index cosine dedup threshold (failure_modes.md §1.4)
+
+enrichment:
+  ollama_model: "mistral:7b-instruct-q4_K_M"   # ADR-001: 7B for descriptor quality
+  ollama_base_url: "http://localhost:11434"
+  ollama_timeout_s: 30            # hard timeout — never hang (failure_modes.md §4.3)
+  max_retries: 3                  # exponential backoff: 1s, 2s, 4s
+  prompt_version: "v1"            # bump when prompt template changes → forces rebuild (ADR-006 invariant 1)
+  descriptor_version: "v1"        # artifact versioning tag; changing forces full rebuild
+
+retrieval:
+  bi_encoder: "BAAI/bge-base-en-v1.5"                      # ADR-001
+  cross_encoder: "cross-encoder/ms-marco-MiniLM-L-6-v2"    # ADR-001
+  ann_top_k: 50                   # Stage 1 ANN candidates (scope.md §two-stage retrieval)
+  rerank_top_k: 10                # Stage 2 final playlist size
+  confidence_threshold: 0.65      # auto-routing: full vs metadata-only index (ADR-006)
+  rerank_variance_threshold: 0.05 # fallback to ANN order if cross-encoder is flat (failure_modes.md §2.3)
+  collapse_genre_threshold: 0.8   # retrieval collapse detection (failure_modes.md §2.2)
+  bm25_weight: 0.5                # RRF fusion weight for BM25 vs dense (scope.md §hybrid retrieval)
+  rrf_k: 60                       # RRF constant k parameter
+
+training:
+  output_dir: "checkpoints/biencoder"   # ADR-003
+  num_epochs: 10
+  batch_size: 32                  # target 32–64 pairs on M1 Max MPS (ADR-003)
+  hard_negative_weight: 0.3       # combined loss: 0.7 in-batch + 0.3 hard negatives (ADR-003)
+  in_batch_weight: 0.7
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.1
+  save_total_limit: 3             # disk space management (failure_modes.md §4.1)
+  hard_negative_mine_top_k: 20    # mine from top-20 bge-base neighbors before fine-tuning
+
+eval:
+  queries_path: "eval/queries.json"
+  results_path: "eval/results.csv"
+  baseline_metrics_path: "eval/baseline_metrics.json"
+  ndcg_k: 10                      # NDCG@10 primary metric (ADR-003, scope.md)
+  mrr_k: 10
+  precision_k: 10
+  novelty_k: 10
+  early_stop_patience: 3          # NDCG@10-based early stopping (ADR-003)
+  early_stop_min_delta: 0.005
+  smoke_test_n_queries: 10        # CI eval job subset (scope.md §CI/CD)
+  regression_threshold: 0.05      # fail CI if NDCG drops >5% from baseline
+
+tensorboard:
+  log_dir: "runs/"                # ADR-004
+  log_every_n_steps: 50           # configurable step-level logging
+
+paths:
+  data_dir: "data/"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  chroma_dir: "chroma_db/"
+  checkpoints_dir: "checkpoints/"
+
+# Feature valid ranges for Spotify audio features (failure_modes.md §1.3)
+feature_valid_ranges:
+  tempo:        [40.0, 250.0]
+  loudness:     [-60.0, 0.0]
+  energy:       [0.0, 1.0]
+  valence:      [0.0, 1.0]
+  acousticness: [0.0, 1.0]
+  danceability: [0.0, 1.0]
+  speechiness:  [0.0, 1.0]

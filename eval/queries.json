@@ -1,0 +1,62 @@
+[
+  {
+    "query": "chill rainy afternoon jazz with some melancholy",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Canonical north-star query from scope.md. Populate relevant_ids after catalog is built."
+  },
+  {
+    "query": "euphoric summer driving",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Mood-based query. scope.md §evaluation suite."
+  },
+  {
+    "query": "modal jazz with spiritual undertones",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Genre-specific query. Tests OOV handling for 'modal'. scope.md."
+  },
+  {
+    "query": "melancholy indie folk for a long train ride",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Hybrid mood+genre query. scope.md §evaluation suite."
+  },
+  {
+    "query": "music that sounds like the end of something",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Abstract query. Tests cross-encoder low variance fallback. scope.md §evaluation."
+  },
+  {
+    "query": "upbeat acoustic singer-songwriter for a morning run",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Activity-based hybrid query."
+  },
+  {
+    "query": "dark electronic ambient like the inside of a machine",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Spatial/abstract query. Tests bge-base OOV for unusual descriptors."
+  },
+  {
+    "query": "post-rock instrumental build to cathartic crescendo",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Genre-specific with structure requirement."
+  },
+  {
+    "query": "warm lo-fi hip hop for late night studying",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Tests 'lo-fi' vocabulary coverage. Possible OOV token."
+  },
+  {
+    "query": "sparse piano introspective classical",
+    "relevant_ids": [],
+    "source": "author_labeled",
+    "notes": "Stub query 10 of 10 for pre-code checklist. scope.md §pre-code checklist."
+  }
+]
