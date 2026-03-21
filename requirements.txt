@@ -34,7 +34,7 @@ httpx==0.28.1                      # failure_modes.md §4.3: async Ollama client
 # Config & schema
 # ---------------------------------------------------------------------------
 pydantic==2.11.1                   # ADR-006: config + data contracts via Pydantic v2
-pydantic-settings==2.8.2           # .env loading for API keys
+pydantic-settings>=2.8.0           # .env loading for API keys
 PyYAML==6.0.2                      # config.yaml loading
 
 # ---------------------------------------------------------------------------
