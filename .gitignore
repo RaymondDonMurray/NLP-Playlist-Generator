@@ -1,5 +1,7 @@
 # Environment & secrets
 .env
+.cache
+.gitignore
 
 # Data artifacts — mounted as Docker volumes, never committed (ADR-005, scope.md §Docker)
 data/
