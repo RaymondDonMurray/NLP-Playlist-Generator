@@ -68,6 +68,7 @@ music-nlp-retrieval/
 @docs/scope.md
 @docs/architecture_decision_record.md
 @docs/failure_modes.md
+@docs/tasks.md
 
 ---
 
