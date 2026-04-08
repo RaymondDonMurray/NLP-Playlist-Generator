@@ -24,6 +24,10 @@ import logging
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import sys
+from pathlib import Path
+
 # Configure root logger before any library imports
 logging.basicConfig(
     level=logging.INFO,
