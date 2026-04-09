@@ -2,7 +2,8 @@
 ## NLP Music Playlist Retrieval System
 
 **Generated:** 2026-04-04
-**Skeleton status:** Phase 1 (data layer) is fully implemented. All `NotImplementedError` stubs are in Phases 2–6.
+**Last updated:** 2026-04-08
+**Skeleton status:** Phase 1 (data layer) is fully implemented. T02, T03, T04, T05, T24 (descriptor generation) are complete. Remaining `NotImplementedError` stubs are in Phases 2 (T01, T06) and Phases 3–6.
 
 ---
 
@@ -20,6 +21,8 @@ The following files are **complete** and require no implementation tasks:
 | `tests/data/test_schema.py` | Complete — all schema tests pass once schema.py is done |
 | `tests/data/test_preprocess.py` | Complete — all preprocess tests pass against current code |
 | `config/config.yaml` | Complete |
+| `src/models/descriptor.py` | Complete — build_prompt, extract_json, generate_descriptor, generate_descriptors_batch (T02, T03, T04, T05) |
+| `scripts/generate_descriptors.py` | Complete — main() with catalog+lyrics merge, validation, batch generation, descriptors.parquet output (T24) |
 
 ---
 
@@ -35,7 +38,7 @@ The following files are **complete** and require no implementation tasks:
 - **Depends on:** none
 - **Context files:** `src/data/schema.py`, `src/models/encoder.py`
 - **Description:** Implement four methods on the `Encoder` class.
-  1. `_load_model`: Detect available device (MPS if `torch.backends.mps.is_available()`, else CPU). Instantiate `SentenceTransformer(self.model_name, device=device)`. Log the device chosen. Return the model. Model name must be read from `self.model_name` (which comes from `config.retrieval.bi_encoder`), never hardcoded.
+  1. `_load_model`: Detect available device (CUDA if `torch.cuda.is_available()`, MPS if `torch.backends.mps.is_available()`, else CPU). Instantiate `SentenceTransformer(self.model_name, device=device)`. Log the device chosen. Return the model. Model name must be read from `self.model_name` (which comes from `config.retrieval.bi_encoder`), never hardcoded.
   2. `encode_query`: bge-base-en-v1.5 uses an asymmetric instruction prefix for queries. Prepend `"Represent this sentence for searching relevant passages: "` to the query string, then call `self.model.encode([prefixed_query], normalize_embeddings=True)`. Return as `list[float]`.
   3. `encode_descriptors`: Encode a list of descriptor strings in batches using `self.model.encode(texts, batch_size=batch_size, show_progress_bar=show_progress, normalize_embeddings=True)`. Return `list[list[float]]`.
   4. `encode_batch`: General-purpose encode without query prefix. Same as `encode_descriptors` but no `show_progress` arg semantics concern.
@@ -51,7 +54,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T02: build_prompt — render descriptor prompt for a single track
+### T02: build_prompt — render descriptor prompt for a single track ✅
 - **File:** `src/models/descriptor.py` → `build_prompt`
 - **Complexity:** [S]
 - **Depends on:** none (schema.py already implemented)
@@ -63,7 +66,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T03: extract_json — extract JSON object from Ollama response text
+### T03: extract_json — extract JSON object from Ollama response text ✅
 - **File:** `src/models/descriptor.py` → `extract_json`
 - **Complexity:** [S]
 - **Depends on:** none
@@ -75,7 +78,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T04: generate_descriptor — single-track descriptor via Ollama with retry
+### T04: generate_descriptor — single-track descriptor via Ollama with retry ✅
 - **File:** `src/models/descriptor.py` → `generate_descriptor`
 - **Complexity:** [M]
 - **Depends on:** T02, T03
@@ -94,7 +97,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T05: generate_descriptors_batch — batch generation with checkpoint/resume
+### T05: generate_descriptors_batch — batch generation with checkpoint/resume ✅
 - **File:** `src/models/descriptor.py` → `generate_descriptors_batch`
 - **Complexity:** [M]
 - **Depends on:** T02, T03, T04
@@ -407,7 +410,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T24: scripts/generate_descriptors.py — main()
+### T24: scripts/generate_descriptors.py — main() ✅
 - **File:** `scripts/generate_descriptors.py` → `main`
 - **Complexity:** [M]
 - **Depends on:** T05

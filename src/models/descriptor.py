@@ -71,17 +71,56 @@ def build_prompt(track: CatalogRecord, prompt_template: str = DESCRIPTOR_PROMPT_
 
     Uses CatalogRecord.prompt_features to ensure no None values reach the LLM.
     failure_modes.md §3.1: prompt_features property converts nullable fields
-    to "unknown X" strings.
+    to "unknown X" strings. The string ": None" must never appear in output.
     """
-    raise NotImplementedError
+    pf = track.prompt_features
+
+    if track.lyrics_available and track.lyrics_text is not None:
+        words = track.lyrics_text.split()
+        excerpt = " ".join(words[:200])
+        lyrics_section = LYRICS_SECTION_TEMPLATE.format(lyrics=excerpt)
+    else:
+        lyrics_section = ""
+
+    return prompt_template.format(
+        title=track.title,
+        artist=track.artist,
+        genre_top=track.genre_top,
+        tempo=pf["tempo"],
+        energy=pf["energy"],
+        valence=pf["valence"],
+        acousticness=pf["acousticness"],
+        danceability=pf["danceability"],
+        has_lyrics="true" if track.lyrics_available else "false",
+        lyrics_section=lyrics_section,
+    )
 
 
 def extract_json(response_text: str) -> str:
     """Extract the JSON object from Ollama response text.
 
-    Handles cases where the model wraps the JSON in markdown code fences.
+    Handles three cases:
+    1. Bare JSON object.
+    2. JSON wrapped in ```json ... ``` code fences.
+    3. JSON with surrounding prose ("Here is the descriptor: {...} Done.").
+
+    Uses rfind('}') not find('}') to avoid truncating nested objects.
     """
-    raise NotImplementedError
+    import re
+
+    text = response_text.strip()
+
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = text.replace("```", "")
+
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start == -1 or end == -1 or end < start:
+        return text  # return as-is; downstream ValidationError will surface the issue
+
+    return text[start : end + 1]
 
 
 # ---------------------------------------------------------------------------
@@ -97,16 +136,72 @@ def generate_descriptor(
 ) -> TrackDescriptor | None:
     """Generate a descriptor for a single track via Ollama.
 
-    Retry logic:
-    - httpx.TimeoutException → exponential backoff (1s, 2s, 4s)
+    Retry logic (failure_modes.md §4.3):
+    - httpx.TimeoutException → exponential backoff (1s, 2s, 4s), retry
     - HTTP 503 → wait 10s, retry
     - ValidationError → return None immediately (prompt issue, not transient)
     - Other HTTP errors → return None immediately
+    - Retries exhausted → log error, return None
 
-    failure_modes.md §4.3: Hard 30s timeout on every request. A hang per
-    track on 5K tracks at 30s = 40+ hours of blocked pipeline.
+    failure_modes.md §4.3: Hard 30s timeout on every request. A 30s hang
+    per track on 5K tracks = 40+ hours of blocked pipeline.
     """
-    raise NotImplementedError
+    prompt = build_prompt(track, prompt_template)
+
+    for attempt in range(config.enrichment.max_retries):
+        try:
+            response = client.post(
+                f"{config.enrichment.ollama_base_url}/api/generate",
+                json={
+                    "model": config.enrichment.ollama_model,
+                    "prompt": prompt,
+                    "format": "json",
+                    "stream": False,
+                },
+                timeout=config.enrichment.ollama_timeout_s,
+            )
+            response.raise_for_status()
+            raw_response = response.json()["response"]
+            extracted = extract_json(raw_response)
+            return TrackDescriptor.model_validate_json(extracted)
+
+        except httpx.TimeoutException:
+            logger.warning(
+                "Ollama timeout on track %s (attempt %d/%d)",
+                track.track_id, attempt + 1, config.enrichment.max_retries,
+            )
+            time.sleep(2 ** attempt)   # 1s, 2s, 4s
+
+        except httpx.ConnectError:
+            # Ollama process is not running — no point retrying, fail fast.
+            raise RuntimeError(
+                f"Cannot connect to Ollama at {config.enrichment.ollama_base_url}. "
+                "Start Ollama with: ollama serve"
+            )
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 503:
+                logger.warning(
+                    "Ollama unavailable (503) on track %s — waiting 10s (attempt %d/%d)",
+                    track.track_id, attempt + 1, config.enrichment.max_retries,
+                )
+                time.sleep(10)
+            else:
+                logger.error(
+                    "Unexpected HTTP error for track %s: %s", track.track_id, e
+                )
+                return None   # don't retry non-transient HTTP errors
+
+        except ValidationError as e:
+            # Schema failure: retrying produces the same bad output (failure_modes.md §4.3)
+            logger.warning(
+                "Bad descriptor schema for track %s (prompt issue, not retrying): %s",
+                track.track_id, e,
+            )
+            return None
+
+    logger.error("Exhausted %d retries for track %s", config.enrichment.max_retries, track.track_id)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -120,12 +215,170 @@ def generate_descriptors_batch(
     checkpoints_dir: Path,
     prompt_template: str = DESCRIPTOR_PROMPT_V1,
 ) -> list[CatalogRecord]:
-    """Generate descriptors for all records with parquet checkpointing.
+    """Generate descriptors for all records with parquet checkpointing and resume.
 
-    Resume logic: loads latest checkpoint, collects processed track_ids,
-    skips them. Final step merges and deduplicates all checkpoint files.
+    Algorithm:
+    1. Compute prompt_hash for checkpoint naming (failure_modes.md §3.3).
+    2. Scan checkpoints_dir for existing checkpoint files; collect processed
+       track_ids (resume logic — skips already-done tracks on restart).
+    3. Iterate unprocessed records in batches of checkpoint_interval.
+    4. Call generate_descriptor() per track; None results set enrichment_tier
+       to metadata_only and are still recorded in the checkpoint.
+    5. Checkpoint every N tracks (failure_modes.md §3.2: atomic manifest).
+    6. Merge all checkpoints; update and return records.
 
     ADR-002: Checkpoint every config.pipeline.checkpoint_interval tracks.
-    failure_modes.md §3.3: Checkpoint filenames include prompt hash.
+    failure_modes.md §3.3: Checkpoint filenames include prompt hash; mismatched
+    versions raise RuntimeError at merge time.
     """
-    raise NotImplementedError
+    import pandas as pd
+    from src.data.preprocess import (
+        load_checkpoint,
+        merge_checkpoints,
+        prompt_version_hash,
+        write_checkpoint,
+    )
+
+    # --- Preflight: verify Ollama is reachable before starting the batch ---
+    try:
+        with httpx.Client(timeout=5.0) as probe:
+            probe.get(f"{config.enrichment.ollama_base_url}/api/tags")
+        logger.info("Ollama reachable at %s", config.enrichment.ollama_base_url)
+    except httpx.ConnectError:
+        raise RuntimeError(
+            f"Cannot connect to Ollama at {config.enrichment.ollama_base_url}. "
+            "Start Ollama with: ollama serve"
+        )
+    except httpx.TimeoutException:
+        raise RuntimeError(
+            f"Ollama at {config.enrichment.ollama_base_url} did not respond within 5s. "
+            "Check that the process is healthy."
+        )
+
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = checkpoints_dir / "manifest.json"
+    prompt_hash = prompt_version_hash(prompt_template)
+
+    logger.info("Prompt hash: %s | Checkpoints dir: %s", prompt_hash, checkpoints_dir)
+
+    # --- Resume: collect already-processed track IDs from valid checkpoints ---
+    processed_ids: set[str] = set()
+    existing_ckpts = sorted(checkpoints_dir.glob(f"desc_{prompt_hash}_*.parquet"))
+    for ckpt_path in existing_ckpts:
+        df = load_checkpoint(ckpt_path, manifest_path)
+        if df is not None and "track_id" in df.columns:
+            processed_ids.update(df["track_id"].tolist())
+
+    logger.info(
+        "Resume: %d tracks already processed from %d checkpoint files",
+        len(processed_ids), len(existing_ckpts),
+    )
+
+    unprocessed = [r for r in records if r.track_id not in processed_ids]
+    logger.info(
+        "Generating descriptors for %d tracks (%d skipped as already processed)",
+        len(unprocessed), len(records) - len(unprocessed),
+    )
+
+    # --- Batch generation ---
+    n_success = 0
+    n_fail = 0
+    batch_rows: list[dict] = []
+    batch_idx = len(existing_ckpts)  # continue checkpoint numbering after existing files
+    interval = config.pipeline.checkpoint_interval
+
+    with httpx.Client() as client:
+        for i, record in enumerate(unprocessed):
+            descriptor = generate_descriptor(record, client, config, prompt_template)
+
+            if descriptor is not None:
+                # confidence: low → metadata_only even if lyrics present (failure_modes.md §2.1)
+                tier: str = "full" if (descriptor.confidence != "low" and record.lyrics_available) else "metadata_only"
+                batch_rows.append({
+                    "track_id": record.track_id,
+                    "descriptor": descriptor.to_descriptor_string(),
+                    "enrichment_tier": tier,
+                })
+                n_success += 1
+            else:
+                logger.warning("Descriptor failed for track %s — marking metadata_only", record.track_id)
+                batch_rows.append({
+                    "track_id": record.track_id,
+                    "descriptor": None,
+                    "enrichment_tier": "metadata_only",
+                })
+                n_fail += 1
+
+            # Write checkpoint every N tracks
+            if len(batch_rows) >= interval:
+                ckpt_path = checkpoints_dir / f"desc_{prompt_hash}_{batch_idx:04d}.parquet"
+                write_checkpoint(pd.DataFrame(batch_rows), ckpt_path, manifest_path)
+                logger.info(
+                    "Checkpoint %04d written (%d tracks; %d/%d total processed)",
+                    batch_idx, len(batch_rows), i + 1, len(unprocessed),
+                )
+                batch_rows = []
+                batch_idx += 1
+
+        # Write any remaining tracks as final checkpoint
+        if batch_rows:
+            ckpt_path = checkpoints_dir / f"desc_{prompt_hash}_{batch_idx:04d}.parquet"
+            write_checkpoint(pd.DataFrame(batch_rows), ckpt_path, manifest_path)
+            logger.info("Final checkpoint %04d written (%d tracks)", batch_idx, len(batch_rows))
+
+    # --- TensorBoard pipeline metrics (ADR-004) ---
+    total_attempted = n_success + n_fail
+    coverage_rate = n_success / total_attempted if total_attempted > 0 else 0.0
+    retry_rate = n_fail / total_attempted if total_attempted > 0 else 0.0
+
+    logger.info(
+        "Descriptor generation done: %d/%d succeeded (coverage %.1f%%, failure %.1f%%)",
+        n_success, total_attempted, coverage_rate * 100, retry_rate * 100,
+    )
+
+    try:
+        import hashlib as _hashlib
+        from datetime import datetime
+        from torch.utils.tensorboard.writer import SummaryWriter
+
+        ts = datetime.now().strftime("%Y%m%d")
+        hash6 = _hashlib.md5(prompt_template.encode()).hexdigest()[:6]
+        run_name = f"{ts}_{hash6}_descriptor_generation"
+        writer = SummaryWriter(log_dir=f"runs/{run_name}")
+        writer.add_scalar("pipeline/coverage_rate", coverage_rate, global_step=0)
+        writer.add_scalar("pipeline/retry_rate", retry_rate, global_step=0)
+        writer.add_text("pipeline/prompt_version", config.enrichment.prompt_version, global_step=0)
+        writer.close()
+        logger.info("TensorBoard metrics logged to runs/%s", run_name)
+    except Exception as tb_err:
+        logger.warning("TensorBoard logging failed (non-fatal): %s", tb_err)
+
+    # --- Merge all checkpoints and update records ---
+    try:
+        merged_df = merge_checkpoints(checkpoints_dir, prompt_hash)
+    except FileNotFoundError:
+        logger.warning("No checkpoints found to merge — returning records unchanged.")
+        return records
+
+    descriptor_map: dict[str, dict] = {}
+    for _, row in merged_df.iterrows():
+        tid = row.get("track_id")
+        if tid and pd.notna(tid):
+            desc_val = row.get("descriptor")
+            descriptor_map[str(tid)] = {
+                "descriptor": str(desc_val) if desc_val is not None and pd.notna(desc_val) else None,
+                "enrichment_tier": row.get("enrichment_tier", "metadata_only"),
+            }
+
+    updated: list[CatalogRecord] = []
+    for record in records:
+        info = descriptor_map.get(record.track_id)
+        if info is not None:
+            updated.append(record.model_copy(update={
+                "descriptor": info["descriptor"],
+                "enrichment_tier": info["enrichment_tier"],
+            }))
+        else:
+            updated.append(record)
+
+    return updated

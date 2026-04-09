@@ -54,8 +54,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    from src.data.schema import AppConfig
+    import math
+    from pathlib import Path
+
+    import pandas as pd
     import yaml
+
+    from src.data.schema import AppConfig
+    from src.data.preprocess import validate_catalog_record
+    from src.models.descriptor import DESCRIPTOR_PROMPT_V1, generate_descriptors_batch
+
     with open(args.config) as f:
         config = AppConfig.model_validate(yaml.safe_load(f))
 
@@ -72,18 +80,116 @@ def main() -> None:
     logger.info("Checkpoint every %d tracks", config.pipeline.checkpoint_interval)
     logger.info("Timeout: %ss | Max retries: %d", config.enrichment.ollama_timeout_s, config.enrichment.max_retries)
 
-    # Steps (not yet implemented):
-    # 1. Load catalog.parquet
-    # 2. Find latest checkpoint (if --resume)
-    # 3. Collect already-processed track_ids from checkpoint
-    # 4. For each unprocessed track:
-    #    a. build_prompt(track)
-    #    b. generate_descriptor_with_retry()
-    #    c. Checkpoint every N tracks (failure_modes.md §3.2)
-    # 5. Merge checkpoints with prompt hash validation (failure_modes.md §3.3)
-    # 6. Save descriptors.parquet
+    processed_dir = Path(config.paths.processed_dir)
+    checkpoints_dir = Path(config.paths.checkpoints_dir) / "descriptors"
 
-    raise NotImplementedError("generate_descriptors.py not yet implemented")
+    # --- Step 1: Load catalog.parquet ---
+    catalog_path = processed_dir / "catalog.parquet"
+    if not catalog_path.exists():
+        logger.error("catalog.parquet not found at %s — run build_catalog.py first", catalog_path)
+        raise FileNotFoundError(f"catalog.parquet not found at {catalog_path}")
+
+    catalog_df = pd.read_parquet(catalog_path)
+    logger.info("Loaded catalog: %d tracks", len(catalog_df))
+
+    # --- Step 2: Load lyrics.parquet and merge on track_id ---
+    lyrics_path = processed_dir / "lyrics.parquet"
+    if lyrics_path.exists():
+        lyrics_df = pd.read_parquet(lyrics_path)
+        logger.info("Loaded lyrics: %d entries", len(lyrics_df))
+
+        # Left join: keep all catalog tracks; add lyrics where available
+        if "track_id" in lyrics_df.columns and "lyrics_text" in lyrics_df.columns:
+            lyrics_subset = lyrics_df[["track_id", "lyrics_text"]].drop_duplicates("track_id")
+            catalog_df = catalog_df.merge(lyrics_subset, on="track_id", how="left")
+            logger.info(
+                "Merged lyrics: %d/%d tracks now have lyrics_text",
+                catalog_df["lyrics_text"].notna().sum(), len(catalog_df),
+            )
+        else:
+            logger.warning(
+                "lyrics.parquet missing expected columns (track_id, lyrics_text) — skipping merge"
+            )
+    else:
+        logger.warning("lyrics.parquet not found at %s — proceeding without lyrics", lyrics_path)
+
+    # --- Step 3: Validate and construct list[CatalogRecord] ---
+    # Set lyrics_available based on whether lyrics_text is populated
+    if "lyrics_text" in catalog_df.columns:
+        catalog_df["lyrics_available"] = catalog_df["lyrics_text"].notna() & (catalog_df["lyrics_text"] != "")
+    else:
+        catalog_df["lyrics_available"] = False
+
+    records = []
+    n_invalid = 0
+    for _, row in catalog_df.iterrows():
+        raw = {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in row.to_dict().items()}
+        try:
+            record = validate_catalog_record(raw, config)
+            records.append(record)
+        except Exception as e:
+            # Hard failure on schema violations (ADR-002) — but log and count to
+            # give the operator a full picture rather than crashing on row 1 of 5K.
+            logger.error("Schema validation failed for track %s: %s", raw.get("track_id"), e)
+            n_invalid += 1
+
+    if n_invalid > 0:
+        raise RuntimeError(
+            f"{n_invalid} catalog records failed schema validation. "
+            f"Fix the catalog (run build_catalog.py) before generating descriptors."
+        )
+
+    logger.info("Validated %d catalog records", len(records))
+
+    # --- Step 4: Apply --max-tracks limit ---
+    if args.max_tracks is not None:
+        records = records[: args.max_tracks]
+        logger.info("--max-tracks %d: processing first %d records", args.max_tracks, len(records))
+
+    # --- Step 5: Select prompt template ---
+    prompt_version = args.prompt_version or config.enrichment.prompt_version
+    if prompt_version == "v1":
+        prompt_template = DESCRIPTOR_PROMPT_V1
+    else:
+        logger.warning(
+            "Unknown prompt version '%s' — falling back to DESCRIPTOR_PROMPT_V1", prompt_version
+        )
+        prompt_template = DESCRIPTOR_PROMPT_V1
+
+    # --- Step 6: Generate descriptors with checkpointing/resume ---
+    updated_records = generate_descriptors_batch(
+        records=records,
+        config=config,
+        checkpoints_dir=checkpoints_dir,
+        prompt_template=prompt_template,
+    )
+
+    # --- Step 7: Save descriptors.parquet ---
+    rows = [
+        {
+            "track_id": r.track_id,
+            "title": r.title,
+            "artist": r.artist,
+            "genre_top": r.genre_top,
+            "descriptor": r.descriptor,
+            "enrichment_tier": r.enrichment_tier,
+            "lyrics_available": r.lyrics_available,
+        }
+        for r in updated_records
+    ]
+    output_df = pd.DataFrame(rows)
+    output_path = processed_dir / "descriptors.parquet"
+    output_df.to_parquet(output_path, index=False)
+
+    n_full = (output_df["enrichment_tier"] == "full").sum()
+    n_meta = (output_df["enrichment_tier"] == "metadata_only").sum()
+    n_with_desc = output_df["descriptor"].notna().sum()
+    coverage = n_with_desc / len(output_df) if len(output_df) > 0 else 0.0
+
+    logger.info(
+        "Saved %d records to %s — full: %d, metadata_only: %d, coverage: %.1f%%",
+        len(output_df), output_path, n_full, n_meta, coverage * 100,
+    )
 
 
 if __name__ == "__main__":
