@@ -37,7 +37,14 @@ class Encoder:
 
         Loads from config.retrieval.bi_encoder — never hardcoded (CLAUDE.md).
         """
-        raise NotImplementedError
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+            device = "mps"
+        else:
+            device = "cpu"
+        logger.info("Loading encoder model '%s' on device '%s'", self.model_name, device)
+        return SentenceTransformer(self.model_name, device=device)
 
     @property
     def model(self) -> SentenceTransformer:
@@ -52,7 +59,9 @@ class Encoder:
         ADR-001: Asymmetric bi-encoder training maps naturally to
         query→descriptor retrieval structure.
         """
-        raise NotImplementedError
+        prefixed = "Represent this sentence for searching relevant passages: " + query
+        vector = self.model.encode([prefixed], normalize_embeddings=True)
+        return vector[0].tolist()
 
     def encode_descriptors(
         self,
@@ -65,8 +74,19 @@ class Encoder:
         scope.md §vector index: Generate all embeddings first → save to parquet
         → single bulk load into Chroma (avoid incremental writes on M1 macOS).
         """
-        raise NotImplementedError
+        vectors = self.model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=show_progress,
+            normalize_embeddings=True,
+        )
+        return [v.tolist() for v in vectors]
 
     def encode_batch(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
         """General-purpose batch encoding without query instruction prefix."""
-        raise NotImplementedError
+        vectors = self.model.encode(
+            texts,
+            batch_size=batch_size,
+            normalize_embeddings=True,
+        )
+        return [v.tolist() for v in vectors]

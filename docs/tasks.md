@@ -2,8 +2,8 @@
 ## NLP Music Playlist Retrieval System
 
 **Generated:** 2026-04-04
-**Last updated:** 2026-04-08
-**Skeleton status:** Phase 1 (data layer) is fully implemented. T02, T03, T04, T05, T24 (descriptor generation) are complete. Remaining `NotImplementedError` stubs are in Phases 2 (T01, T06) and Phases 3–6.
+**Last updated:** 2026-04-11
+**Skeleton status:** Phase 1 (data layer) is fully implemented. T01, T02, T03, T04, T05, T24 (descriptor generation) are complete. Remaining `NotImplementedError` stubs are in Phases 2 (T06) and Phases 3–6.
 
 ---
 
@@ -23,6 +23,8 @@ The following files are **complete** and require no implementation tasks:
 | `config/config.yaml` | Complete |
 | `src/models/descriptor.py` | Complete — build_prompt, extract_json, generate_descriptor, generate_descriptors_batch (T02, T03, T04, T05) |
 | `scripts/generate_descriptors.py` | Complete — main() with catalog+lyrics merge, validation, batch generation, descriptors.parquet output (T24) |
+| `src/models/encoder.py` | Complete — _load_model (CUDA→MPS→CPU), encode_query (instruction prefix), encode_descriptors, encode_batch (T01) |
+| `tests/models/test_encoder.py` | Complete — 29 tests covering device selection, lazy loading, return types, prefix, normalization, batch forwarding |
 
 ---
 
@@ -32,7 +34,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T01: Encoder — lazy model load and encode methods
+### T01: Encoder — lazy model load and encode methods ✅
 - **File:** `src/models/encoder.py` → `Encoder._load_model`, `Encoder.encode_query`, `Encoder.encode_descriptors`, `Encoder.encode_batch`
 - **Complexity:** [S]
 - **Depends on:** none
