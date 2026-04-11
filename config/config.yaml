@@ -22,8 +22,8 @@ enrichment:
   ollama_base_url: "http://localhost:11434"
   ollama_timeout_s: 30            # hard timeout — never hang (failure_modes.md §4.3)
   max_retries: 3                  # exponential backoff: 1s, 2s, 4s
-  prompt_version: "v1"            # bump when prompt template changes → forces rebuild (ADR-006 invariant 1)
-  descriptor_version: "v1"        # artifact versioning tag; changing forces full rebuild
+  prompt_version: "v2"            # bump when prompt template changes → forces rebuild (ADR-006 invariant 1)
+  descriptor_version: "v2"        # artifact versioning tag; changing forces full rebuild
 
 retrieval:
   bi_encoder: "BAAI/bge-base-en-v1.5"                      # ADR-001

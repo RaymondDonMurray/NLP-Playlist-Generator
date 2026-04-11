@@ -62,7 +62,7 @@ def main() -> None:
 
     from src.data.schema import AppConfig
     from src.data.preprocess import validate_catalog_record
-    from src.models.descriptor import DESCRIPTOR_PROMPT_V1, generate_descriptors_batch
+    from src.models.descriptor import PROMPT_VERSIONS, generate_descriptors_batch
 
     with open(args.config) as f:
         config = AppConfig.model_validate(yaml.safe_load(f))
@@ -148,13 +148,15 @@ def main() -> None:
 
     # --- Step 5: Select prompt template ---
     prompt_version = args.prompt_version or config.enrichment.prompt_version
-    if prompt_version == "v1":
-        prompt_template = DESCRIPTOR_PROMPT_V1
+    if prompt_version in PROMPT_VERSIONS:
+        prompt_template = PROMPT_VERSIONS[prompt_version]
+        logger.info("Using prompt version '%s'", prompt_version)
     else:
         logger.warning(
-            "Unknown prompt version '%s' — falling back to DESCRIPTOR_PROMPT_V1", prompt_version
+            "Unknown prompt version '%s' — falling back to v1. Available: %s",
+            prompt_version, list(PROMPT_VERSIONS.keys()),
         )
-        prompt_template = DESCRIPTOR_PROMPT_V1
+        prompt_template = PROMPT_VERSIONS["v1"]
 
     # --- Step 6: Generate descriptors with checkpointing/resume ---
     updated_records = generate_descriptors_batch(

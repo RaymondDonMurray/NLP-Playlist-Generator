@@ -63,7 +63,56 @@ Rules:
 - Respond with ONLY the JSON object, no explanation.
 """
 
+# ---------------------------------------------------------------------------
+# V2: Tightened lyrical_themes enforcement.
+# Root cause of V1 failure: lyrical_themes was treated as optional even for
+# lyric-bearing tracks. V2 makes it rule #1 and explicitly marks it REQUIRED.
+# ---------------------------------------------------------------------------
+
+DESCRIPTOR_PROMPT_V2 = """\
+You are a music librarian generating structured track descriptors for a music retrieval system.
+
+Given the following track metadata, generate a descriptor in valid JSON format.
+
+Track metadata:
+- Title: {title}
+- Artist: {artist}
+- Genre: {genre_top}
+- Tempo: {tempo}
+- Energy: {energy} (0=low, 1=high)
+- Valence: {valence} (0=sad/negative, 1=happy/positive)
+- Acousticness: {acousticness} (0=electronic, 1=acoustic)
+- Danceability: {danceability} (0=low, 1=high)
+- Has lyrics: {has_lyrics}
+{lyrics_section}
+
+Generate a JSON object with EXACTLY these fields:
+{{
+  "mood": "<2-4 adjectives describing the emotional character>",
+  "tempo_feel": "<subjective tempo: very slow | slow | moderate | upbeat | fast | frenetic>",
+  "genre": "<specific genre descriptor, more specific than the genre tag if possible>",
+  "lyrical_themes": "<comma-separated lyrical themes — REQUIRED non-null string when has_lyrics is true, null ONLY when has_lyrics is false>",
+  "narrative": "<1-2 sentences evoking the sonic character and feel>",
+  "has_lyrics": <true or false>,
+  "confidence": "<high | medium | low>"
+}}
+
+RULES — all are mandatory:
+1. lyrical_themes: When has_lyrics is true you MUST provide a non-null string summarising the lyrical content \
+(e.g. "loss and longing, late-night isolation, nostalgia"). Use the lyrics excerpt above. \
+Only set lyrical_themes to null when has_lyrics is false.
+2. Do NOT invent lyrical themes for instrumental tracks (has_lyrics=false). Set lyrical_themes to null.
+3. narrative: Write 1-2 evocative sentences about the listening experience. Do not restate the metadata.
+4. confidence: Set to "low" when uncertain about mood, genre, or lyrical content.
+5. Respond with ONLY the JSON object — no explanation, no markdown code fences.
+"""
+
 LYRICS_SECTION_TEMPLATE = "- Lyrics excerpt (first ~200 tokens):\n{lyrics}"
+
+PROMPT_VERSIONS: dict[str, str] = {
+    "v1": DESCRIPTOR_PROMPT_V1,
+    "v2": DESCRIPTOR_PROMPT_V2,
+}
 
 
 def build_prompt(track: CatalogRecord, prompt_template: str = DESCRIPTOR_PROMPT_V1) -> str:
