@@ -34,7 +34,8 @@ class Reranker:
 
     def _load_model(self) -> CrossEncoder:
         """Lazy-load cross-encoder. Model name read from config (CLAUDE.md)."""
-        raise NotImplementedError
+        logger.info("Loading cross-encoder model: %s", self.model_name)
+        return CrossEncoder(self.model_name)
 
     @property
     def model(self) -> CrossEncoder:
@@ -59,7 +60,28 @@ class Reranker:
             - score_std: float
             - reason: str (if reranker_used=False)
         """
-        raise NotImplementedError
+        scores = self._score_pairs(query, candidates)
+        score_std = float(np.std(scores))
+
+        if score_std < self.config.retrieval.rerank_variance_threshold:
+            logger.warning(
+                "Low rerank variance (%.3f) for query '%s' — returning ANN order",
+                score_std,
+                query[:60],
+            )
+            return candidates, {
+                "reranker_used": False,
+                "reason": "low_variance",
+                "score_std": score_std,
+            }
+
+        ranked = [
+            candidate.model_copy(update={"rerank_score": float(score)})
+            for candidate, score in sorted(
+                zip(candidates, scores), key=lambda x: -x[1]
+            )
+        ]
+        return ranked, {"reranker_used": True, "score_std": score_std}
 
     def _score_pairs(
         self,
@@ -67,4 +89,5 @@ class Reranker:
         candidates: list[CandidateTrack],
     ) -> np.ndarray:
         """Score all (query, descriptor) pairs with the cross-encoder."""
-        raise NotImplementedError
+        pairs = [(query, candidate.descriptor or "") for candidate in candidates]
+        return self.model.predict(pairs)

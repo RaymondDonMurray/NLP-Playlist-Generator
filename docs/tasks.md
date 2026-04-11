@@ -3,7 +3,7 @@
 
 **Generated:** 2026-04-04
 **Last updated:** 2026-04-11
-**Skeleton status:** Phase 1 (data layer) is fully implemented. T01, T02, T03, T04, T05, T24 (descriptor generation) are complete. Remaining `NotImplementedError` stubs are in Phases 2 (T06) and Phases 3–6.
+**Skeleton status:** Phase 1 (data layer) is fully implemented. T01, T02, T03, T04, T05, T06, T24 (descriptor generation) are complete. Remaining `NotImplementedError` stubs are in Phase 3–6.
 
 ---
 
@@ -25,6 +25,7 @@ The following files are **complete** and require no implementation tasks:
 | `scripts/generate_descriptors.py` | Complete — main() with catalog+lyrics merge, validation, batch generation, descriptors.parquet output (T24) |
 | `src/models/encoder.py` | Complete — _load_model (CUDA→MPS→CPU), encode_query (instruction prefix), encode_descriptors, encode_batch (T01) |
 | `tests/models/test_encoder.py` | Complete — 29 tests covering device selection, lazy loading, return types, prefix, normalization, batch forwarding |
+| `src/models/reranker.py` | Complete — _load_model, _score_pairs, rerank with low-variance ANN fallback (T06) |
 
 ---
 
@@ -119,7 +120,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T06: Reranker — model load, score pairs, rerank with variance fallback
+### T06: Reranker — model load, score pairs, rerank with variance fallback ✅
 - **File:** `src/models/reranker.py` → `Reranker._load_model`, `Reranker._score_pairs`, `Reranker.rerank`
 - **Complexity:** [M]
 - **Depends on:** none (schema.py already implemented)
