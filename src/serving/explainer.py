@@ -12,6 +12,8 @@ Import discipline (CLAUDE.md): serving/ imports from models/ and data/schema.py.
 from __future__ import annotations
 
 import logging
+import time
+from time import perf_counter
 
 import httpx
 
@@ -51,8 +53,18 @@ class Explainer:
         query: str,
         track: CandidateTrack,
     ) -> str:
-        """Build the per-track explanation prompt."""
-        raise NotImplementedError
+        """Build the per-track explanation prompt.
+
+        Handles None descriptor and genre_top with safe fallbacks so the LLM
+        never receives None values (failure_modes.md §3.1).
+        """
+        return EXPLANATION_PROMPT_TEMPLATE.format(
+            query=query,
+            title=track.title,
+            artist=track.artist,
+            genre=track.genre_top if track.genre_top is not None else "Unknown",
+            descriptor=track.descriptor if track.descriptor is not None else "[no descriptor available]",
+        )
 
     def explain_track(
         self,
@@ -62,14 +74,79 @@ class Explainer:
     ) -> str | None:
         """Generate a one-line explanation for why a track matches a query.
 
-        Returns None on failure (timeout, schema error). Explanation is a
-        soft-failure context — a missing explanation does not break the response.
+        Applies the same retry/timeout logic as descriptor generation
+        (failure_modes.md §4.3): 30s hard timeout, exponential backoff on
+        transient failures, no retry on schema errors.
+
+        Returns None on failure (timeout exhausted, HTTP error). A missing
+        explanation is a soft failure — does not break the response.
         """
-        raise NotImplementedError
+        prompt = self._build_explanation_prompt(query, track)
+        max_retries = self.config.enrichment.max_retries
+
+        for attempt in range(max_retries):
+            try:
+                response = client.post(
+                    f"{self.config.enrichment.ollama_base_url}/api/generate",
+                    json={
+                        "model": self.config.enrichment.ollama_model,
+                        "prompt": prompt,
+                        "stream": False,
+                    },
+                    timeout=self.config.enrichment.ollama_timeout_s,
+                )
+                response.raise_for_status()
+                explanation = response.json()["response"].strip()
+                return explanation if explanation else None
+
+            except httpx.TimeoutException:
+                logger.warning(
+                    "Ollama timeout explaining track %s (attempt %d/%d)",
+                    track.track_id, attempt + 1, max_retries,
+                )
+                time.sleep(2 ** attempt)
+
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 503:
+                    logger.warning(
+                        "Ollama unavailable while explaining track %s — waiting 10s",
+                        track.track_id,
+                    )
+                    time.sleep(10)
+                else:
+                    logger.error(
+                        "Unexpected HTTP error explaining track %s: %s",
+                        track.track_id, e,
+                    )
+                    return None
+
+        logger.error("Exhausted retries explaining track %s", track.track_id)
+        return None
 
     def explain(self, request: ExplainRequest) -> ExplainResponse:
         """Generate explanations for all tracks in the request.
 
-        Tracks with failed explanations have explanation=None.
+        Creates one httpx.Client reused across all tracks. Tracks with failed
+        explanations have explanation=None — a missing explanation is a soft
+        failure that does not raise.
         """
-        raise NotImplementedError
+        start = perf_counter()
+        tracks_with_explanations: list[CandidateTrack] = []
+
+        with httpx.Client() as client:
+            for track in request.tracks:
+                explanation = self.explain_track(request.query, track, client)
+                if explanation is None:
+                    logger.warning(
+                        "Failed to generate explanation for track %s", track.track_id,
+                    )
+                tracks_with_explanations.append(
+                    track.model_copy(update={"explanation": explanation})
+                )
+
+        elapsed_ms = (perf_counter() - start) * 1000
+        return ExplainResponse(
+            query=request.query,
+            tracks=tracks_with_explanations,
+            explain_ms=elapsed_ms,
+        )
