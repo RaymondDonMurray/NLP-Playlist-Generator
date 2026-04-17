@@ -2,8 +2,8 @@
 ## NLP Music Playlist Retrieval System
 
 **Generated:** 2026-04-04
-**Last updated:** 2026-04-16
-**Skeleton status:** Phase 1 (data layer) is fully implemented. T01, T02, T03, T04, T05, T06, T24 (descriptor generation) are complete. T07–T16 (Retriever class) are complete. T18 (Explainer) is complete. Remaining `NotImplementedError` stubs are in Phase 3 (T17, T19) and Phase 4–6.
+**Last updated:** 2026-04-16 (T25 complete)
+**Skeleton status:** Phase 1 (data layer) is fully implemented. T01, T02, T03, T04, T05, T06, T24 (descriptor generation) are complete. T07–T16 (Retriever class) are complete. T18 (Explainer) is complete. T25 (build_index.py) is complete. Remaining `NotImplementedError` stubs are in Phase 3 (T17, T19) and Phase 4–6.
 
 ---
 
@@ -28,6 +28,7 @@ The following files are **complete** and require no implementation tasks:
 | `src/models/reranker.py` | Complete — _load_model, _score_pairs, rerank with low-variance ANN fallback (T06) |
 | `src/serving/retriever.py` | Complete — _get_chroma_client, _build_bm25_indexes, _compute_confidence, _select_index_tier, _dense_retrieve, _bm25_retrieve, _rrf_fuse, _detect_retrieval_collapse, _check_query_vocabulary, retrieve (T07–T16) |
 | `src/serving/explainer.py` | Complete — _build_explanation_prompt, explain_track (retry/timeout per failure_modes §4.3), explain (T18) |
+| `scripts/build_index.py` | Complete — embed descriptors, split dual indexes, staging/dedup/spot-check/atomic promote (T25) |
 
 ---
 
@@ -437,7 +438,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T25: scripts/build_index.py — main()
+### T25: scripts/build_index.py — main() ✅
 - **File:** `scripts/build_index.py` → `main`
 - **Complexity:** [L]
 - **Depends on:** T01, T07
