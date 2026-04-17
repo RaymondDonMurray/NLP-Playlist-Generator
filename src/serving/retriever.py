@@ -173,7 +173,7 @@ class Retriever:
 
         raw_embeddings = results.get("embeddings") or [[]]
         embeddings = raw_embeddings[0] if raw_embeddings else []
-        if not embeddings:
+        if len(embeddings) == 0:
             return 0.0
 
         candidate_matrix = np.array(embeddings, dtype=np.float32)
@@ -438,7 +438,13 @@ class Retriever:
         # Step 4: Dense ANN retrieve
         client = self._get_chroma_client()
         collection_name = COLLECTION_FULL if tier == "full" else COLLECTION_META_ONLY
-        collection = client.get_collection(collection_name)
+        try:
+            collection = client.get_collection(collection_name)
+        except Exception as exc:
+            raise RuntimeError(
+                f"ChromaDB collection '{collection_name}' does not exist. "
+                "Run 'python scripts/build_index.py' to build the index before serving."
+            ) from exc
         dense_candidates = self._dense_retrieve(query_embedding, collection, request.top_k)
 
         # Step 5: BM25 retrieve

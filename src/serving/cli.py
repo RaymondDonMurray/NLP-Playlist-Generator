@@ -29,8 +29,11 @@ import logging
 import sys
 from pathlib import Path
 
+import yaml
+
 from src.data.schema import (
     AppConfig,
+    CandidateTrack,
     ExplainRequest,
     RerankRequest,
     RetrieveRequest,
@@ -50,15 +53,23 @@ def load_config(config_path: str) -> AppConfig:
     ADR-006: Pydantic validation at startup — any missing/misconfigured key
     is a hard failure, not a silent runtime error.
     """
-    raise NotImplementedError
+    with open(config_path, "r") as f:
+        raw = yaml.safe_load(f)
+    return AppConfig.model_validate(raw)
 
 
 def build_components(config: AppConfig) -> tuple[Retriever, Ranker, Explainer]:
     """Initialize all serving components from config.
 
     ADR-006: Components initialized once; stateless between requests.
+    Instantiation order: Encoder → Retriever → Reranker → Ranker → Explainer.
     """
-    raise NotImplementedError
+    encoder = Encoder(config)
+    retriever = Retriever(config, encoder)
+    reranker = Reranker(config)
+    ranker = Ranker(config, retriever, reranker)
+    explainer = Explainer(config)
+    return retriever, ranker, explainer
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +83,24 @@ def cmd_retrieve(args: argparse.Namespace, config: AppConfig) -> None:
     Validates input via RetrieveRequest (failure_modes.md §4.4), then
     runs Retriever.retrieve() and prints JSON output.
     """
-    raise NotImplementedError
+    request = RetrieveRequest(
+        query=args.query,
+        top_k=args.top_k,
+        index_tier=args.index_tier,
+    )
+    retriever, _, _ = build_components(config)
+    response = retriever.retrieve(request)
+
+    if args.json_output:
+        print(response.model_dump_json(indent=2))
+    else:
+        print(f"Query: {response.query}")
+        print(f"Index tier: {response.index_tier_used} | Retrieval: {response.retrieval_ms:.1f}ms")
+        if response.warning:
+            print(f"Warning: {response.warning}")
+        for i, track in enumerate(response.candidates, 1):
+            score = f"{track.rrf_score:.3f}" if track.rrf_score is not None else "N/A"
+            print(f"  {i:2}. {track.title} — {track.artist} [{track.genre_top}] (rrf: {score})")
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +114,31 @@ def cmd_rerank(args: argparse.Namespace, config: AppConfig) -> None:
     Reads candidates from --candidates JSON file, validates via RerankRequest,
     runs Reranker.rerank(), prints JSON output.
     """
-    raise NotImplementedError
+    raw = json.loads(Path(args.candidates).read_text())
+    # Accept either a list of CandidateTrack dicts or a full RetrieveResponse dict.
+    if isinstance(raw, list):
+        candidates = [CandidateTrack.model_validate(c) for c in raw]
+    else:
+        candidates = [CandidateTrack.model_validate(c) for c in raw["candidates"]]
+
+    request = RerankRequest(
+        query=args.query,
+        candidates=candidates,
+        top_k=args.top_k,
+    )
+    _, ranker, _ = build_components(config)
+    response = ranker.rerank(request)
+
+    if args.json_output:
+        print(response.model_dump_json(indent=2))
+    else:
+        print(f"Query: {response.query}")
+        print(f"Reranker used: {response.reranker_used} | Rerank: {response.rerank_ms:.1f}ms")
+        if response.warning:
+            print(f"Warning: {response.warning}")
+        for i, track in enumerate(response.tracks, 1):
+            score = f"{track.rerank_score:.3f}" if track.rerank_score is not None else "N/A"
+            print(f"  {i:2}. {track.title} — {track.artist} [{track.genre_top}] (rerank: {score})")
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +152,26 @@ def cmd_explain(args: argparse.Namespace, config: AppConfig) -> None:
     Reads tracks from --tracks JSON file, validates via ExplainRequest,
     runs Explainer.explain(), prints JSON output.
     """
-    raise NotImplementedError
+    raw = json.loads(Path(args.tracks).read_text())
+    # Accept either a list of CandidateTrack dicts or a full RerankResponse dict.
+    if isinstance(raw, list):
+        tracks = [CandidateTrack.model_validate(t) for t in raw]
+    else:
+        tracks = [CandidateTrack.model_validate(t) for t in raw["tracks"]]
+
+    request = ExplainRequest(query=args.query, tracks=tracks)
+    _, _, explainer = build_components(config)
+    response = explainer.explain(request)
+
+    if args.json_output:
+        print(response.model_dump_json(indent=2))
+    else:
+        print(f"Query: {response.query}")
+        print(f"Explain: {response.explain_ms:.1f}ms")
+        for i, track in enumerate(response.tracks, 1):
+            explanation = track.explanation or "[no explanation]"
+            print(f"  {i:2}. {track.title} — {track.artist}")
+            print(f"      {explanation}")
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +225,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     """Entry point: python -m src.serving.cli <command> [args]."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     parser = build_parser()
     args = parser.parse_args()
     config = load_config(args.config)
