@@ -2,8 +2,8 @@
 ## NLP Music Playlist Retrieval System
 
 **Generated:** 2026-04-04
-**Last updated:** 2026-04-11
-**Skeleton status:** Phase 1 (data layer) is fully implemented. T01, T02, T03, T04, T05, T06, T24 (descriptor generation) are complete. Remaining `NotImplementedError` stubs are in Phase 3–6.
+**Last updated:** 2026-04-16
+**Skeleton status:** Phase 1 (data layer) is fully implemented. T01, T02, T03, T04, T05, T06, T24 (descriptor generation) are complete. T07–T16 (Retriever class) are complete. Remaining `NotImplementedError` stubs are in Phase 3 (T17–T19) and Phase 4–6.
 
 ---
 
@@ -26,6 +26,7 @@ The following files are **complete** and require no implementation tasks:
 | `src/models/encoder.py` | Complete — _load_model (CUDA→MPS→CPU), encode_query (instruction prefix), encode_descriptors, encode_batch (T01) |
 | `tests/models/test_encoder.py` | Complete — 29 tests covering device selection, lazy loading, return types, prefix, normalization, batch forwarding |
 | `src/models/reranker.py` | Complete — _load_model, _score_pairs, rerank with low-variance ANN fallback (T06) |
+| `src/serving/retriever.py` | Complete — _get_chroma_client, _build_bm25_indexes, _compute_confidence, _select_index_tier, _dense_retrieve, _bm25_retrieve, _rrf_fuse, _detect_retrieval_collapse, _check_query_vocabulary, retrieve (T07–T16) |
 
 ---
 
@@ -144,9 +145,11 @@ The following files are **complete** and require no implementation tasks:
 
 *Milestone: `python -m src.serving.cli retrieve --query "chill jazz" --json-output` returns valid JSON. `pytest tests/serving/` passes.*
 
+**Retriever (T07–T16): complete.** Remaining: T17 (Ranker), T18 (Explainer), T19 (CLI).
+
 ---
 
-### T07: Retriever._get_chroma_client — lazy ChromaDB init
+### T07: Retriever._get_chroma_client — lazy ChromaDB init ✅
 - **File:** `src/serving/retriever.py` → `Retriever._get_chroma_client`
 - **Complexity:** [S]
 - **Depends on:** none
@@ -158,7 +161,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T08: Retriever._build_bm25_indexes — build in-memory BM25 over all descriptors
+### T08: Retriever._build_bm25_indexes — build in-memory BM25 over all descriptors ✅
 - **File:** `src/serving/retriever.py` → `Retriever._build_bm25_indexes`
 - **Complexity:** [M]
 - **Depends on:** T07
@@ -172,7 +175,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T09: Retriever._compute_confidence — routing confidence score
+### T09: Retriever._compute_confidence — routing confidence score ✅
 - **File:** `src/serving/retriever.py` → `Retriever._compute_confidence`
 - **Complexity:** [S]
 - **Depends on:** T07
@@ -186,7 +189,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T10: Retriever._select_index_tier — resolve auto-routing
+### T10: Retriever._select_index_tier — resolve auto-routing ✅
 - **File:** `src/serving/retriever.py` → `Retriever._select_index_tier`
 - **Complexity:** [S]
 - **Depends on:** T09
@@ -197,7 +200,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T11: Retriever._dense_retrieve — ANN retrieval from ChromaDB
+### T11: Retriever._dense_retrieve — ANN retrieval from ChromaDB ✅
 - **File:** `src/serving/retriever.py` → `Retriever._dense_retrieve`
 - **Complexity:** [S]
 - **Depends on:** T07
@@ -209,7 +212,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T12: Retriever._bm25_retrieve — BM25 retrieval over descriptor text
+### T12: Retriever._bm25_retrieve — BM25 retrieval over descriptor text ✅
 - **File:** `src/serving/retriever.py` → `Retriever._bm25_retrieve`
 - **Complexity:** [M]
 - **Depends on:** T08
@@ -223,7 +226,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T13: Retriever._rrf_fuse — Reciprocal Rank Fusion
+### T13: Retriever._rrf_fuse — Reciprocal Rank Fusion ✅
 - **File:** `src/serving/retriever.py` → `Retriever._rrf_fuse`
 - **Complexity:** [S]
 - **Depends on:** none (pure logic)
@@ -235,7 +238,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T14: Retriever._detect_retrieval_collapse — genre concentration check
+### T14: Retriever._detect_retrieval_collapse — genre concentration check ✅
 - **File:** `src/serving/retriever.py` → `Retriever._detect_retrieval_collapse`
 - **Complexity:** [S]
 - **Depends on:** none (pure logic)
@@ -247,7 +250,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T15: Retriever._check_query_vocabulary — OOV token diagnostic
+### T15: Retriever._check_query_vocabulary — OOV token diagnostic ✅
 - **File:** `src/serving/retriever.py` → `Retriever._check_query_vocabulary`
 - **Complexity:** [S]
 - **Depends on:** T01
@@ -259,7 +262,7 @@ The following files are **complete** and require no implementation tasks:
 
 ---
 
-### T16: Retriever.retrieve — full retrieval pipeline
+### T16: Retriever.retrieve — full retrieval pipeline ✅
 - **File:** `src/serving/retriever.py` → `Retriever.retrieve`
 - **Complexity:** [M]
 - **Depends on:** T07, T08, T09, T10, T11, T12, T13, T14, T15
