@@ -435,20 +435,26 @@ class Retriever:
         # Step 3: Select index tier
         tier = self._select_index_tier(query_embedding)
 
-        # Step 4: Dense ANN retrieve
-        client = self._get_chroma_client()
-        collection_name = COLLECTION_FULL if tier == "full" else COLLECTION_META_ONLY
-        try:
-            collection = client.get_collection(collection_name)
-        except Exception as exc:
-            raise RuntimeError(
-                f"ChromaDB collection '{collection_name}' does not exist. "
-                "Run 'python scripts/build_index.py' to build the index before serving."
-            ) from exc
-        dense_candidates = self._dense_retrieve(query_embedding, collection, request.top_k)
+        # Step 4: Dense ANN retrieve (skip if use_dense=False for ablations)
+        if self.config.retrieval.use_dense:
+            client = self._get_chroma_client()
+            collection_name = COLLECTION_FULL if tier == "full" else COLLECTION_META_ONLY
+            try:
+                collection = client.get_collection(collection_name)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"ChromaDB collection '{collection_name}' does not exist. "
+                    "Run 'python scripts/build_index.py' to build the index before serving."
+                ) from exc
+            dense_candidates = self._dense_retrieve(query_embedding, collection, request.top_k)
+        else:
+            dense_candidates = []
 
-        # Step 5: BM25 retrieve
-        bm25_candidates = self._bm25_retrieve(request.query, tier, request.top_k)
+        # Step 5: BM25 retrieve (skip if use_bm25=False for ablations)
+        if self.config.retrieval.use_bm25:
+            bm25_candidates = self._bm25_retrieve(request.query, tier, request.top_k)
+        else:
+            bm25_candidates = []
 
         # Step 6: RRF fusion — truncate to top_k after fusion
         fused = self._rrf_fuse(dense_candidates, bm25_candidates)
