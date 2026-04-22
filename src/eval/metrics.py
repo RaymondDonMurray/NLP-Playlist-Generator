@@ -30,7 +30,19 @@ def ndcg_at_k(
     Returns:
         NDCG@k ∈ [0, 1].
     """
-    raise NotImplementedError
+    if not relevant_ids:
+        return 0.0
+
+    dcg = sum(
+        1.0 / math.log2(i + 2)
+        for i, track_id in enumerate(retrieved_ids[:k])
+        if track_id in relevant_ids
+    )
+
+    ideal_hits = min(k, len(relevant_ids))
+    idcg = sum(1.0 / math.log2(i + 2) for i in range(ideal_hits))
+
+    return dcg / idcg if idcg > 0.0 else 0.0
 
 
 def mrr(
@@ -51,7 +63,10 @@ def mrr(
     Returns:
         MRR ∈ [0, 1]. 0.0 if no relevant track in top-k.
     """
-    raise NotImplementedError
+    for i, track_id in enumerate(retrieved_ids[:k]):
+        if track_id in relevant_ids:
+            return 1.0 / (i + 1)
+    return 0.0
 
 
 def precision_at_k(
@@ -66,7 +81,8 @@ def precision_at_k(
     Returns:
         P@k ∈ [0, 1].
     """
-    raise NotImplementedError
+    hits = sum(1 for t in retrieved_ids[:k] if t in relevant_ids)
+    return hits / k
 
 
 def novelty_at_k(
@@ -91,7 +107,11 @@ def novelty_at_k(
     Returns:
         Novelty@k ∈ [0, 1]. Higher is better (less popular = more novel).
     """
-    raise NotImplementedError
+    top_k = retrieved_ids[:k]
+    if not top_k:
+        return 0.0
+    novelties = [1.0 - track_popularity.get(t, 0.5) for t in top_k]
+    return sum(novelties) / len(novelties)
 
 
 def compute_all_metrics(
