@@ -35,6 +35,9 @@ retrieval:
   collapse_genre_threshold: 0.8   # retrieval collapse detection (failure_modes.md §2.2)
   bm25_weight: 0.5                # RRF fusion weight for BM25 vs dense (scope.md §hybrid retrieval)
   rrf_k: 60                       # RRF constant k parameter
+  use_dense: true                 # ablation flag: enable/disable dense ANN retrieval
+  use_bm25: true                  # ablation flag: enable/disable BM25 retrieval
+  use_reranker: true              # ablation flag: enable/disable cross-encoder reranking
 
 training:
   output_dir: "checkpoints/biencoder"   # ADR-003
