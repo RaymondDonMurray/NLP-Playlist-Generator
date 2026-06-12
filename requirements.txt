@@ -28,7 +28,21 @@ pyarrow==19.0.1                    # Parquet serialization backend
 rapidfuzz==3.12.1                  # scope.md §preprocessing: fuzzy join FMA→Spotify
 ftfy==6.3.1                        # failure_modes.md §1.2: lyrics Unicode fixing
 spotipy==2.25.1                    # scope.md: Spotify Web API client
-httpx==0.28.1                      # failure_modes.md §4.3: async Ollama client with timeout
+httpx==0.28.1                      # failure_modes.md §4.3: local LLM client with timeout
+
+# ---------------------------------------------------------------------------
+# Audio feature extraction (offline pipeline only — replaces EchoNest coverage)
+# ADR-002 amendment (2026-06-12): Essentia signal + TF models over FMA audio
+# streamed from HuggingFace. Apple-Silicon arm64/cp312 wheels verified Phase 0.
+# Not needed for serving/eval — kept separate so the serving image stays lean.
+# essentia-tensorflow bundles a CPU-only libtensorflow; no tensorflow-metal
+# (it does not accelerate essentia's bundled TF on macOS — see src/data/compute.py).
+# Audio is streamed as raw bytes (datasets Audio(decode=False)) and decoded +
+# resampled by Essentia's MonoLoader — so no torchcodec/soundfile decode backend
+# is needed. python-dotenv is already declared above (used by src/data/ingest.py).
+# ---------------------------------------------------------------------------
+essentia-tensorflow==2.1b6.dev1389  # signal algos + TF model inference (Genre/Mood/Instrument/AudioSet)
+datasets==5.0.0                     # HuggingFace streaming: benjamin-paine/free-music-archive-large
 
 # ---------------------------------------------------------------------------
 # Config & schema

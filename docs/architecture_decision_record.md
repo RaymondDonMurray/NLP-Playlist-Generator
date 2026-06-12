@@ -106,6 +106,34 @@ flowchart LR
 - Mixed validation: strict on catalog schema, lenient on enrichment quality
 - Dual ChromaDB indexes: `full_enrichment` and `metadata_only`
 
+> **Amendment (2026-06-12): audio features via Essentia, replacing EchoNest.**
+> The Spotify audio-features endpoint was restricted for new apps (Nov 2024), so
+> the pipeline had been sourcing features from FMA's local `echonest.csv`. That
+> covers only 13,129 of 106,574 FMA tracks — an inner join drops **93,445**
+> tracks purely for lack of features. We now extract audio features directly with
+> **Essentia** (signal algos: tempo/key/danceability/dynamic-complexity; TF
+> models: Genre-Discogs400, Mood/Instrument-Jamendo, Moods-Audioset), streaming
+> audio from HuggingFace `benjamin-paine/free-music-archive-large`. This lifts the
+> coverage ceiling and lets the catalog **scale beyond the original 3–5K target**.
+>
+> *Join key:* the HF dataset carries no `track_id`; the integer id is recovered
+> via `url` → `raw_tracks.csv.track_url` (exact match, ~99% coverage; ~1K
+> null/duplicate URLs fall back to the zero-padded audio filename, else drop).
+>
+> *Compute device:* extraction resolves CUDA → Metal → CPU via
+> `src/data/compute.py::get_compute_device()` (distinct from
+> `enrichment.llm_backend`). On Apple Silicon, essentia-tensorflow bundles a
+> CPU-only libtensorflow and tensorflow-metal does not accelerate it, so local
+> runs are CPU (~2–3s/track). GPU helps only the TF-inference slice and at small
+> per-track batches yields ~2–4×; the planned scale-out is **CPU parallelism on a
+> multi-vCPU VM**, with extraction kept independent of the LLM serving topology.
+>
+> *Schema gaps:* Essentia has no `valence` or `acousticness` equivalent (dropped
+> from prompt **v3**); `danceability` becomes categorical (binned), and a
+> `speechiness` proxy is derived from the AudioSet speech-class probability mass
+> (re-tuned threshold — the EchoNest-calibrated `speechiness_max` does not
+> transfer). Retrieval/rerank/eval use descriptor *text* only and are unaffected.
+
 **Rationale:**
 
 *Batch:* The catalog is static. Streaming adds complexity with no benefit. The pipeline runs once to build indexes, then serves queries.

@@ -75,6 +75,20 @@ paths:
   chroma_dir: "chroma_db/"
   checkpoints_dir: "checkpoints/"
 
+# Essentia audio-feature extraction (ADR-002 amendment 2026-06-12)
+# Replaces EchoNest coverage (13K tracks) by extracting from FMA audio (106K).
+audio:
+  hf_dataset: "benjamin-paine/free-music-archive-large"  # streamed, no full download
+  sample_rate: 16000              # Essentia effnet/yamnet models expect 16 kHz mono
+  models_dir: "checkpoints/essentia_models"
+  checkpoint_interval: 200        # tracks per parquet checkpoint (resume granularity)
+  genre_top_k: 3                  # top-N labels: Genre-Discogs400
+  mood_top_k: 3                   # top-N labels: mtg-jamendo moodtheme
+  instrument_top_k: 4             # top-N labels: mtg-jamendo instrument
+  audioset_mood_top_k: 2          # top-N labels: YAMNet AudioSet music-mood subtree
+  danceability_threshold: 1.0     # Essentia Danceability ~[0,3] → "danceable"/"non-danceable" (tune)
+  energy_norm: 10.0               # DynamicComplexity (dB-ish) → 0-1 energy proxy divisor (coarse)
+
 # Feature valid ranges for Spotify audio features (failure_modes.md §1.3)
 feature_valid_ranges:
   tempo:        [40.0, 250.0]

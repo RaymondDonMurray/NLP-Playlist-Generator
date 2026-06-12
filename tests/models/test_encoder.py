@@ -11,6 +11,7 @@ All tests mock SentenceTransformer so no model download is required.
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -18,9 +19,13 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-# Stub sentence_transformers before any local import triggers encoder.py,
-# so tests run without the package installed.
-if "sentence_transformers" not in sys.modules:
+# Stub sentence_transformers ONLY when it is genuinely not installed, so the
+# suite still runs in a minimal CI env. When the real package is present we must
+# NOT clobber it — this module is collected before tests/serving/, and a stub
+# left in sys.modules would break `from sentence_transformers import CrossEncoder`
+# in reranker.py. The device tests below patch src.models.encoder.SentenceTransformer
+# directly, so they pass either way.
+if importlib.util.find_spec("sentence_transformers") is None and "sentence_transformers" not in sys.modules:
     _st_stub = types.ModuleType("sentence_transformers")
     _st_stub.SentenceTransformer = MagicMock
     sys.modules["sentence_transformers"] = _st_stub
