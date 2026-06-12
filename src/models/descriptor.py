@@ -1,24 +1,29 @@
 """src/models/descriptor.py
 
-Mistral 7B descriptor generation via Ollama.
-ADR-001: mistral:7b-instruct-q4_K_M chosen for descriptor quality over speed.
+Mistral 7B descriptor generation via the configured local LLM backend
+(LM Studio / Ollama — see src/models/llm_client.py).
+ADR-001: Mistral 7B chosen for descriptor quality over speed.
 ADR-002: ~2s/track; batch with parquet checkpointing every N tracks.
-failure_modes.md §4.3: Hard 30s timeout; exponential backoff; no retry on ValidationError.
+failure_modes.md §4.3: Hard timeout; exponential backoff; no retry on ValidationError.
 failure_modes.md §2.1: Pydantic enforces null lyrical_themes for instrumentals.
 
-Import discipline (CLAUDE.md): models/ imports from data/schema.py only.
+Output is constrained at the decoder via a JSON schema derived from
+TrackDescriptor; extract_json + Pydantic validation remain the gatekeeper.
+
+Import discipline (CLAUDE.md): models/ imports from data/schema.py only
+(llm_client.py is same-layer).
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from pathlib import Path
 
 import httpx
 from pydantic import ValidationError
 
 from src.data.schema import AppConfig, CatalogRecord, TrackDescriptor
+from src.models.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +151,7 @@ def build_prompt(track: CatalogRecord, prompt_template: str = DESCRIPTOR_PROMPT_
 
 
 def extract_json(response_text: str) -> str:
-    """Extract the JSON object from Ollama response text.
+    """Extract the JSON object from the LLM response text.
 
     Handles three cases:
     1. Bare JSON object.
@@ -183,74 +188,40 @@ def generate_descriptor(
     config: AppConfig,
     prompt_template: str = DESCRIPTOR_PROMPT_V1,
 ) -> TrackDescriptor | None:
-    """Generate a descriptor for a single track via Ollama.
+    """Generate a descriptor for a single track via the configured LLM backend.
 
-    Retry logic (failure_modes.md §4.3):
-    - httpx.TimeoutException → exponential backoff (1s, 2s, 4s), retry
-    - HTTP 503 → wait 10s, retry
-    - ValidationError → return None immediately (prompt issue, not transient)
-    - Other HTTP errors → return None immediately
-    - Retries exhausted → log error, return None
+    Transport + retry (timeout backoff, 503 wait, fail-fast on dead process)
+    live in LLMClient (failure_modes.md §4.3). Output is constrained by a JSON
+    schema derived from TrackDescriptor; the response is still run through
+    extract_json + Pydantic validation here.
 
-    failure_modes.md §4.3: Hard 30s timeout on every request. A 30s hang
-    per track on 5K tracks = 40+ hours of blocked pipeline.
+    Returns None on:
+    - transport failure (LLMClient.complete returns None), or
+    - ValidationError — schema mismatch is a prompt/model issue, not transient,
+      so it is NOT retried (failure_modes.md §4.3).
     """
     prompt = build_prompt(track, prompt_template)
+    llm = LLMClient(config)
 
-    for attempt in range(config.enrichment.max_retries):
-        try:
-            response = client.post(
-                f"{config.enrichment.ollama_base_url}/api/generate",
-                json={
-                    "model": config.enrichment.ollama_model,
-                    "prompt": prompt,
-                    "format": "json",
-                    "stream": False,
-                },
-                timeout=config.enrichment.ollama_timeout_s,
-            )
-            response.raise_for_status()
-            raw_response = response.json()["response"]
-            extracted = extract_json(raw_response)
-            return TrackDescriptor.model_validate_json(extracted)
+    raw_response = llm.complete(
+        prompt,
+        client,
+        json_schema=TrackDescriptor.model_json_schema(),
+        context=track.track_id,
+    )
+    if raw_response is None:
+        return None
 
-        except httpx.TimeoutException:
-            logger.warning(
-                "Ollama timeout on track %s (attempt %d/%d)",
-                track.track_id, attempt + 1, config.enrichment.max_retries,
-            )
-            time.sleep(2 ** attempt)   # 1s, 2s, 4s
-
-        except httpx.ConnectError:
-            # Ollama process is not running — no point retrying, fail fast.
-            raise RuntimeError(
-                f"Cannot connect to Ollama at {config.enrichment.ollama_base_url}. "
-                "Start Ollama with: ollama serve"
-            )
-
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 503:
-                logger.warning(
-                    "Ollama unavailable (503) on track %s — waiting 10s (attempt %d/%d)",
-                    track.track_id, attempt + 1, config.enrichment.max_retries,
-                )
-                time.sleep(10)
-            else:
-                logger.error(
-                    "Unexpected HTTP error for track %s: %s", track.track_id, e
-                )
-                return None   # don't retry non-transient HTTP errors
-
-        except ValidationError as e:
-            # Schema failure: retrying produces the same bad output (failure_modes.md §4.3)
-            logger.warning(
-                "Bad descriptor schema for track %s (prompt issue, not retrying): %s",
-                track.track_id, e,
-            )
-            return None
-
-    logger.error("Exhausted %d retries for track %s", config.enrichment.max_retries, track.track_id)
-    return None
+    try:
+        extracted = extract_json(raw_response)
+        return TrackDescriptor.model_validate_json(extracted)
+    except ValidationError as e:
+        # Schema failure: retrying produces the same bad output (failure_modes.md §4.3)
+        logger.warning(
+            "Bad descriptor schema for track %s (prompt issue, not retrying): %s",
+            track.track_id, e,
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -288,21 +259,8 @@ def generate_descriptors_batch(
         write_checkpoint,
     )
 
-    # --- Preflight: verify Ollama is reachable before starting the batch ---
-    try:
-        with httpx.Client(timeout=5.0) as probe:
-            probe.get(f"{config.enrichment.ollama_base_url}/api/tags")
-        logger.info("Ollama reachable at %s", config.enrichment.ollama_base_url)
-    except httpx.ConnectError:
-        raise RuntimeError(
-            f"Cannot connect to Ollama at {config.enrichment.ollama_base_url}. "
-            "Start Ollama with: ollama serve"
-        )
-    except httpx.TimeoutException:
-        raise RuntimeError(
-            f"Ollama at {config.enrichment.ollama_base_url} did not respond within 5s. "
-            "Check that the process is healthy."
-        )
+    # --- Preflight: verify the LLM backend is reachable before the batch ---
+    LLMClient(config).health_check()
 
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = checkpoints_dir / "manifest.json"

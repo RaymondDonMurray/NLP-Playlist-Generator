@@ -18,9 +18,10 @@ pipeline:
   dedup_similarity_threshold: 0.98  # post-index cosine dedup threshold (failure_modes.md §1.4)
 
 enrichment:
-  ollama_model: "mistral:7b-instruct-q4_K_M"   # ADR-001: 7B for descriptor quality
-  ollama_base_url: "http://localhost:11434"
-  ollama_timeout_s: 30            # hard timeout — never hang (failure_modes.md §4.3)
+  llm_backend: "lmstudio"         # lmstudio (MLX, local dev) | ollama (Docker/Linux sidecar)
+  llm_model: "mistral-7b-instruct-v0.3"   # must match server's model id (GET /v1/models); ADR-001 Mistral 7B
+  llm_base_url: "http://localhost:1234/v1"  # LM Studio OpenAI server; ollama path: http://localhost:11434
+  llm_timeout_s: 60               # raised from 30: LM Studio JIT cold-load can exceed 30s (failure_modes.md §4.3)
   max_retries: 3                  # exponential backoff: 1s, 2s, 4s
   prompt_version: "v2"            # bump when prompt template changes → forces rebuild (ADR-006 invariant 1)
   descriptor_version: "v2"        # artifact versioning tag; changing forces full rebuild

@@ -69,7 +69,18 @@ flowchart LR
 **Decisions:**
 - Bi-encoder: `BAAI/bge-base-en-v1.5` (109M params, ~430MB)
 - Cross-encoder: `cross-encoder/ms-marco-MiniLM-L-6-v2`
-- Descriptor/explanation LLM: `mistral:7b-instruct-q4_K_M` via Ollama (~4.5GB)
+- Descriptor/explanation LLM: Mistral 7B Instruct via a backend-selectable local transport
+
+> **Amendment (2026-06-12):** The LLM transport is now backend-selectable
+> (`enrichment.llm_backend`, see `src/models/llm_client.py`). Local Apple-Silicon
+> dev defaults to **LM Studio** serving an **MLX** build
+> (`mistral-7b-instruct-v0.3`) over the OpenAI-compatible API at
+> `http://localhost:1234/v1`, to exploit MLX inference. The Docker/Linux path
+> keeps the **Ollama** sidecar (`mistral:7b-instruct-q4_K_M`), since MLX cannot
+> run in a Linux container. Descriptor output is constrained at the decoder via a
+> JSON schema (`response_format: json_schema`, `strict: false`); `extract_json`
+> + Pydantic validation remain the gatekeeper. The model choice (Mistral 7B) is
+> unchanged.
 
 **Rationale:**
 

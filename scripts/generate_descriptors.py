@@ -2,9 +2,10 @@
 
 Entry point: Mistral 7B descriptor generation → descriptors.parquet.
 scope.md §hourly timeline hours 7–9.
-ADR-001: mistral:7b-instruct-q4_K_M via Ollama (~2s/track, ~3hr for 5K tracks).
+ADR-001: Mistral 7B via the configured LLM backend (LM Studio / Ollama),
+~2s/track, ~3hr for 5K tracks.
 ADR-002: Checkpointing every N=100 tracks; resume from latest checkpoint.
-failure_modes.md §4.3: Hard 30s timeout; exponential backoff.
+failure_modes.md §4.3: Hard timeout; exponential backoff.
 failure_modes.md §3.3: Prompt hash in checkpoint filenames; assert at merge.
 
 Usage:
@@ -76,9 +77,12 @@ def main() -> None:
             args.prompt_version,
         )
 
-    logger.info("Ollama model: %s", config.enrichment.ollama_model)
+    logger.info(
+        "LLM backend: %s | model: %s | url: %s",
+        config.enrichment.llm_backend, config.enrichment.llm_model, config.enrichment.llm_base_url,
+    )
     logger.info("Checkpoint every %d tracks", config.pipeline.checkpoint_interval)
-    logger.info("Timeout: %ss | Max retries: %d", config.enrichment.ollama_timeout_s, config.enrichment.max_retries)
+    logger.info("Timeout: %ss | Max retries: %d", config.enrichment.llm_timeout_s, config.enrichment.max_retries)
 
     processed_dir = Path(config.paths.processed_dir)
     checkpoints_dir = Path(config.paths.checkpoints_dir) / "descriptors"

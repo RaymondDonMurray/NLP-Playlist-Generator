@@ -2,6 +2,15 @@
 # ADR-005: Ollama runs as a sidecar service with model volume mounted.
 # scope.md §Docker: docker-compose up → indexes built, eval runs, results printed.
 # Target: docker-compose up → working demo in under 5 commands.
+#
+# LLM backend note: local Apple-Silicon dev uses LM Studio + MLX
+# (enrichment.llm_backend: "lmstudio"). MLX cannot run inside a Linux container,
+# so the containerized path uses the Ollama sidecar below. For `docker-compose up`,
+# set in config.yaml:  enrichment.llm_backend: "ollama"
+#                      enrichment.llm_model:   "mistral:7b-instruct-q4_K_M"
+#                      enrichment.llm_base_url: "http://ollama:11434"
+# (Alternatively point llm_base_url at host LM Studio via host.docker.internal:1234
+#  — Mac host only; breaks the Linux/AMD64 path.)
 
 services:
 
@@ -37,8 +46,11 @@ services:
       - ./checkpoints:/app/checkpoints
       - ./eval:/app/eval
     environment:
-      # Ollama endpoint — points to sidecar service
-      - OLLAMA_BASE_URL=http://ollama:11434
+      # LLM backend for the containerized run (see config.yaml note above).
+      # NOTE: config.yaml is the source of truth; these are informational unless
+      # you wire env overrides into AppConfig loading.
+      - LLM_BACKEND=ollama
+      - LLM_BASE_URL=http://ollama:11434
     env_file:
       - .env   # SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, GENIUS_ACCESS_TOKEN
     depends_on:

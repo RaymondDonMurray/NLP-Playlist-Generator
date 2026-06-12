@@ -3,8 +3,9 @@
 Per-track explanation generation via Mistral 7B.
 ADR-005: explain command is async/offline — not on the critical retrieval path.
 scope.md §playlist output: one-line explanation of why each track matches query.
-ADR-001: Same Mistral 7B model as descriptor generation via Ollama.
-failure_modes.md §4.3: Hard timeout; exponential backoff patterns apply here too.
+ADR-001: Same Mistral 7B model as descriptor generation, via the configured
+LLM backend (LM Studio / Ollama — see src/models/llm_client.py).
+failure_modes.md §4.3: Hard timeout; exponential backoff (owned by LLMClient).
 
 Import discipline (CLAUDE.md): serving/ imports from models/ and data/schema.py.
 """
@@ -12,7 +13,6 @@ Import discipline (CLAUDE.md): serving/ imports from models/ and data/schema.py.
 from __future__ import annotations
 
 import logging
-import time
 from time import perf_counter
 
 import httpx
@@ -23,6 +23,7 @@ from src.data.schema import (
     ExplainRequest,
     ExplainResponse,
 )
+from src.models.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class Explainer:
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
+        self.llm = LLMClient(config)
 
     def _build_explanation_prompt(
         self,
@@ -74,54 +76,19 @@ class Explainer:
     ) -> str | None:
         """Generate a one-line explanation for why a track matches a query.
 
-        Applies the same retry/timeout logic as descriptor generation
-        (failure_modes.md §4.3): 30s hard timeout, exponential backoff on
-        transient failures, no retry on schema errors.
+        Transport + retry/timeout logic lives in LLMClient (failure_modes.md
+        §4.3). Plain-text output (no JSON schema) — just stripped.
 
-        Returns None on failure (timeout exhausted, HTTP error). A missing
-        explanation is a soft failure — does not break the response.
+        Returns None on failure (timeout exhausted, HTTP error, or empty
+        output). A missing explanation is a soft failure — does not break the
+        response.
         """
         prompt = self._build_explanation_prompt(query, track)
-        max_retries = self.config.enrichment.max_retries
-
-        for attempt in range(max_retries):
-            try:
-                response = client.post(
-                    f"{self.config.enrichment.ollama_base_url}/api/generate",
-                    json={
-                        "model": self.config.enrichment.ollama_model,
-                        "prompt": prompt,
-                        "stream": False,
-                    },
-                    timeout=self.config.enrichment.ollama_timeout_s,
-                )
-                response.raise_for_status()
-                explanation = response.json()["response"].strip()
-                return explanation if explanation else None
-
-            except httpx.TimeoutException:
-                logger.warning(
-                    "Ollama timeout explaining track %s (attempt %d/%d)",
-                    track.track_id, attempt + 1, max_retries,
-                )
-                time.sleep(2 ** attempt)
-
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 503:
-                    logger.warning(
-                        "Ollama unavailable while explaining track %s — waiting 10s",
-                        track.track_id,
-                    )
-                    time.sleep(10)
-                else:
-                    logger.error(
-                        "Unexpected HTTP error explaining track %s: %s",
-                        track.track_id, e,
-                    )
-                    return None
-
-        logger.error("Exhausted retries explaining track %s", track.track_id)
-        return None
+        explanation = self.llm.complete(prompt, client, context=track.track_id)
+        if explanation is None:
+            return None
+        explanation = explanation.strip()
+        return explanation if explanation else None
 
     def explain(self, request: ExplainRequest) -> ExplainResponse:
         """Generate explanations for all tracks in the request.
