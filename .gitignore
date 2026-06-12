@@ -4,14 +4,16 @@
 .gitignore
 
 # Data artifacts — mounted as Docker volumes, never committed (ADR-005, scope.md §Docker)
-data/
-chroma_db/
+# NOTE: leading slash anchors to repo root — a bare `data/` also matches src/data/
+# and tests/data/, which silently kept the entire data layer out of version control.
+/data/
+/chroma_db/
 
 # TensorBoard logs — gitignored, referenced by run name in README (ADR-004)
-runs/
+/runs/
 
 # Model checkpoints — gitignored (CLAUDE.md)
-checkpoints/
+/checkpoints/
 
 # Python
 __pycache__/
