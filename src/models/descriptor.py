@@ -112,20 +112,69 @@ Only set lyrical_themes to null when has_lyrics is false.
 5. Respond with ONLY the JSON object — no explanation, no markdown code fences.
 """
 
+# ---------------------------------------------------------------------------
+# V3: Essentia-feature schema (ADR-002 amendment 2026-06-12).
+# Drops valence/acousticness (no Essentia equivalent); adds key, Essentia genre
+# tags, moods, and instruments; danceability is categorical. The OUTPUT schema
+# (TrackDescriptor) is unchanged, so the decoder json_schema is unaffected.
+# ---------------------------------------------------------------------------
+
+DESCRIPTOR_PROMPT_V3 = """\
+You are a music librarian generating structured track descriptors for a music retrieval system.
+
+Given the following track metadata, generate a descriptor in valid JSON format.
+
+Track metadata:
+- Title: {title}
+- Artist: {artist}
+- Genre: {genre_top}
+- Detected genres: {genres}
+- Key: {key}
+- Tempo: {tempo}
+- Energy: {energy} (0=low, 1=high)
+- Danceability: {danceability}
+- Detected moods: {moods}
+- Detected instruments: {instruments}
+- Has lyrics: {has_lyrics}
+{lyrics_section}
+
+Generate a JSON object with EXACTLY these fields:
+{{
+  "mood": "<2-4 adjectives describing the emotional character>",
+  "tempo_feel": "<subjective tempo: very slow | slow | moderate | upbeat | fast | frenetic>",
+  "genre": "<specific genre descriptor, more specific than the genre tag if possible>",
+  "lyrical_themes": "<comma-separated lyrical themes — REQUIRED non-null string when has_lyrics is true, null ONLY when has_lyrics is false>",
+  "narrative": "<1-2 sentences evoking the sonic character and feel>",
+  "has_lyrics": <true or false>,
+  "confidence": "<high | medium | low>"
+}}
+
+RULES — all are mandatory:
+1. lyrical_themes: When has_lyrics is true you MUST provide a non-null string summarising the lyrical content. \
+Only set lyrical_themes to null when has_lyrics is false.
+2. Do NOT invent lyrical themes for instrumental tracks (has_lyrics=false). Set lyrical_themes to null.
+3. Use the detected genres, moods, and instruments to ground mood, genre, and narrative — do not restate them verbatim.
+4. confidence: Set to "low" when uncertain about mood, genre, or lyrical content.
+5. Respond with ONLY the JSON object — no explanation, no markdown code fences.
+"""
+
 LYRICS_SECTION_TEMPLATE = "- Lyrics excerpt (first ~200 tokens):\n{lyrics}"
 
 PROMPT_VERSIONS: dict[str, str] = {
-    "v1": DESCRIPTOR_PROMPT_V1,
-    "v2": DESCRIPTOR_PROMPT_V2,
+    "v1": DESCRIPTOR_PROMPT_V1,   # legacy (EchoNest schema; valence/acousticness)
+    "v2": DESCRIPTOR_PROMPT_V2,   # legacy (EchoNest schema; valence/acousticness)
+    "v3": DESCRIPTOR_PROMPT_V3,   # current — Essentia schema
 }
 
 
-def build_prompt(track: CatalogRecord, prompt_template: str = DESCRIPTOR_PROMPT_V1) -> str:
+def build_prompt(track: CatalogRecord, prompt_template: str = DESCRIPTOR_PROMPT_V3) -> str:
     """Render the descriptor prompt for a single track.
 
     Uses CatalogRecord.prompt_features to ensure no None values reach the LLM.
-    failure_modes.md §3.1: prompt_features property converts nullable fields
-    to "unknown X" strings. The string ": None" must never appear in output.
+    failure_modes.md §3.1: prompt_features converts nullable fields to "unknown X"
+    strings; the string ": None" must never appear in output. Targets prompt v3
+    (Essentia schema); legacy v1/v2 reference valence/acousticness placeholders no
+    longer supplied by prompt_features and are retained for history only.
     """
     pf = track.prompt_features
 
@@ -140,11 +189,13 @@ def build_prompt(track: CatalogRecord, prompt_template: str = DESCRIPTOR_PROMPT_
         title=track.title,
         artist=track.artist,
         genre_top=track.genre_top,
+        genres=pf["genres"],
+        key=pf["key"],
         tempo=pf["tempo"],
         energy=pf["energy"],
-        valence=pf["valence"],
-        acousticness=pf["acousticness"],
         danceability=pf["danceability"],
+        moods=pf["moods"],
+        instruments=pf["instruments"],
         has_lyrics="true" if track.lyrics_available else "false",
         lyrics_section=lyrics_section,
     )
@@ -186,7 +237,7 @@ def generate_descriptor(
     track: CatalogRecord,
     client: httpx.Client,
     config: AppConfig,
-    prompt_template: str = DESCRIPTOR_PROMPT_V1,
+    prompt_template: str = DESCRIPTOR_PROMPT_V3,
 ) -> TrackDescriptor | None:
     """Generate a descriptor for a single track via the configured LLM backend.
 
@@ -233,7 +284,7 @@ def generate_descriptors_batch(
     records: list[CatalogRecord],
     config: AppConfig,
     checkpoints_dir: Path,
-    prompt_template: str = DESCRIPTOR_PROMPT_V1,
+    prompt_template: str = DESCRIPTOR_PROMPT_V3,
 ) -> list[CatalogRecord]:
     """Generate descriptors for all records with parquet checkpointing and resume.
 

@@ -25,8 +25,10 @@ FEATURE_VALID_RANGES: dict[str, tuple[float, float]] = {
     "energy":       (0.0,     1.0),
     "valence":      (0.0,     1.0),
     "acousticness": (0.0,     1.0),
-    "danceability": (0.0,     1.0),
     "speechiness":  (0.0,     1.0),
+    # NOTE: danceability is no longer a numeric range-checked feature — the Essentia
+    # pipeline (ADR-002 amendment) emits it as a categorical string, so it is excluded
+    # here and passed through validate_audio_features untouched.
 }
 
 
@@ -42,17 +44,25 @@ class CatalogRecord(BaseModel):
     artist: str
     genre_top: str = "Unknown"
 
-    # Spotify audio features — all nullable; sentinel values nulled at ingest
-    # (failure_modes.md §1.3)
+    # Audio features. Numeric ones (tempo/energy/speechiness) are nullable; sentinels
+    # nulled at ingest (failure_modes.md §1.3). The Essentia pipeline (ADR-002 amendment
+    # 2026-06-12) supplies tempo/energy/speechiness/key/genres/moods/instruments and a
+    # categorical danceability; valence/acousticness have no Essentia equivalent and are
+    # retained only as legacy nullable fields (always None under the Essentia pipeline).
     spotify_id: str | None = None
     tempo:        float | None = None
     energy:       float | None = None
-    valence:      float | None = None
-    acousticness: float | None = None
-    danceability: float | None = None
+    valence:      float | None = None      # legacy (EchoNest); None under Essentia
+    acousticness: float | None = None      # legacy (EchoNest); None under Essentia
+    danceability: str | None = None        # categorical: "danceable" | "non-danceable"
     loudness:     float | None = None
     speechiness:  float | None = None
     duration_ms:  int   | None = None
+    key:          str | None = None        # e.g. "G minor" (Essentia KeyExtractor)
+    genres:       list[str] = Field(default_factory=list)       # Essentia Genre-Discogs400 top-k
+    moods:        list[str] = Field(default_factory=list)       # mtg-jamendo + AudioSet moods
+    instruments:  list[str] = Field(default_factory=list)       # mtg-jamendo instruments
+    instrumental: bool = False             # HF FMA flag; drives lyrics-skip + null themes
 
     # Lyrics enrichment
     lyrics_text:     str | None = None
@@ -69,15 +79,22 @@ class CatalogRecord(BaseModel):
     def prompt_features(self) -> dict[str, str]:
         """Prompt-safe feature dict — never passes None to the LLM.
 
-        failure_modes.md §3.1: The LLM receives "unknown tempo" rather than
-        None or an empty string. The latter causes the model to invent a value.
+        failure_modes.md §3.1: The LLM receives "unknown tempo" rather than None
+        or an empty string. The latter causes the model to invent a value.
+        Drives prompt v3 (ADR-002 amendment): valence/acousticness dropped; key,
+        genres, moods, instruments added; danceability is categorical.
         """
+        def _join(items: list[str], label: str) -> str:
+            return ", ".join(items) if items else f"unknown {label}"
+
         return {
             "tempo":        f"{self.tempo:.0f} BPM" if self.tempo is not None else "unknown tempo",
             "energy":       f"{self.energy:.2f}"    if self.energy is not None else "unknown energy",
-            "valence":      f"{self.valence:.2f}"   if self.valence is not None else "unknown valence",
-            "acousticness": f"{self.acousticness:.2f}" if self.acousticness is not None else "unknown acousticness",
-            "danceability": f"{self.danceability:.2f}" if self.danceability is not None else "unknown danceability",
+            "danceability": self.danceability if self.danceability else "unknown danceability",
+            "key":          self.key if self.key else "unknown key",
+            "genres":       _join(self.genres, "genres"),
+            "moods":        _join(self.moods, "moods"),
+            "instruments":  _join(self.instruments, "instruments"),
         }
 
     @property
@@ -330,6 +347,7 @@ class PipelineConfig(BaseModel):
     speechiness_max: float = 0.5
     duration_ms_min: int = 30000
     dedup_similarity_threshold: float = 0.98
+    genius_max_results: int = 3      # Genius fallback: try up to N search hits for lyrics
 
 
 class EnrichmentConfig(BaseModel):

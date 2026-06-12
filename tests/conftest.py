@@ -49,7 +49,7 @@ FIXTURE_TRACKS = [
         "energy": 0.31,
         "valence": 0.18,
         "acousticness": 0.89,
-        "danceability": 0.40,
+        "danceability": "non-danceable",
         "lyrics_available": True,
         "lyrics_text": "Walking in the rain, feeling so alone. "
                        "The blues have found me here at home. "
@@ -65,7 +65,7 @@ FIXTURE_TRACKS = [
         "energy": 0.85,
         "valence": 0.72,
         "acousticness": 0.05,
-        "danceability": 0.88,
+        "danceability": "danceable",
         "lyrics_available": False,
         "enrichment_tier": "metadata_only",
     },
@@ -78,7 +78,7 @@ FIXTURE_TRACKS = [
         "energy": 0.52,
         "valence": 0.61,
         "acousticness": 0.76,
-        "danceability": 0.55,
+        "danceability": "danceable",
         "lyrics_available": True,
         "lyrics_text": "The mountain sings a song so old. "
                        "Through valleys deep and forests cold. "
@@ -94,7 +94,7 @@ FIXTURE_TRACKS = [
         "energy": 0.78,
         "valence": 0.55,
         "acousticness": 0.12,
-        "danceability": 0.82,
+        "danceability": "danceable",
         "lyrics_available": True,
         "lyrics_text": "Concrete jungle, neon lights. "
                        "Moving through the city nights. "
@@ -110,7 +110,7 @@ FIXTURE_TRACKS = [
         "energy": 0.22,
         "valence": 0.35,
         "acousticness": 0.95,
-        "danceability": 0.28,
+        "danceability": "non-danceable",
         "lyrics_available": False,
         "enrichment_tier": "metadata_only",
     },

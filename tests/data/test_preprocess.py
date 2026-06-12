@@ -10,10 +10,65 @@ import pytest
 
 from src.data.preprocess import (
     clean_lyrics,
+    essentia_features_to_record,
     prompt_version_hash,
     validate_audio_features,
 )
 from src.data.schema import FEATURE_VALID_RANGES
+
+
+class TestEssentiaFeaturesToRecord:
+    """ADR-002 amendment: Essentia audio_features row + FMA meta → CatalogRecord."""
+
+    def _audio_row(self, **over):
+        row = {
+            "track_id": 2,
+            "tempo_bpm": 114.4,
+            "key": "F# major",
+            "danceability": "danceable",
+            "energy": 0.23,
+            "genres": ["Hip Hop---Gangsta", "Hip Hop---Thug Rap"],
+            "moods": ["energetic", "Exciting music"],
+            "instruments": ["synthesizer", "drums"],
+            "speechiness": 0.001,
+            "instrumental": False,
+        }
+        row.update(over)
+        return row
+
+    def _fma_meta(self, **over):
+        meta = {"title": "Food", "artist": "AWOL", "genre_top": "Hip-Hop", "duration_ms": 200000}
+        meta.update(over)
+        return meta
+
+    def test_maps_all_fields(self):
+        rec = essentia_features_to_record(self._audio_row(), self._fma_meta())
+        assert rec.track_id == "fma_000002"   # int → zero-padded fma id
+        assert rec.title == "Food" and rec.artist == "AWOL"
+        assert rec.tempo == pytest.approx(114.4)        # tempo_bpm → tempo
+        assert rec.energy == pytest.approx(0.23)
+        assert rec.danceability == "danceable"          # categorical passthrough
+        assert rec.key == "F# major"
+        assert rec.genres == ["Hip Hop---Gangsta", "Hip Hop---Thug Rap"]
+        assert rec.instruments == ["synthesizer", "drums"]
+        assert rec.speechiness == pytest.approx(0.001)
+        assert rec.duration_ms == 200000
+
+    def test_valence_acousticness_left_none(self):
+        rec = essentia_features_to_record(self._audio_row(), self._fma_meta())
+        assert rec.valence is None and rec.acousticness is None
+
+    def test_instrumental_flag_carried(self):
+        rec = essentia_features_to_record(self._audio_row(instrumental=True), self._fma_meta())
+        assert rec.instrumental is True
+
+    def test_lyrics_not_set_by_adapter(self):
+        rec = essentia_features_to_record(self._audio_row(), self._fma_meta())
+        assert rec.lyrics_available is False and rec.lyrics_text is None
+
+    def test_missing_genre_top_defaults(self):
+        rec = essentia_features_to_record(self._audio_row(), self._fma_meta(genre_top=None))
+        assert rec.genre_top == "Unknown"
 
 
 class TestCleanLyrics:

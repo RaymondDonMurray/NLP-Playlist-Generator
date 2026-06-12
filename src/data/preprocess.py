@@ -329,6 +329,57 @@ def validate_catalog_record(raw: dict, config: AppConfig) -> CatalogRecord:
 
 
 # ---------------------------------------------------------------------------
+# Essentia → CatalogRecord adapter (ADR-002 amendment 2026-06-12)
+# Bridges the extracted audio_features.parquet rows + FMA metadata into the
+# canonical CatalogRecord, replacing the EchoNest join.
+# ---------------------------------------------------------------------------
+
+def essentia_features_to_record(audio_row: dict, fma_meta: dict) -> CatalogRecord:
+    """Build a CatalogRecord from an Essentia audio-feature row + FMA metadata.
+
+    Maps tempo_bpm→tempo, energy→energy, passes the categorical danceability and
+    key/genres/moods/instruments/speechiness straight through, and carries the HF
+    `instrumental` flag (which drives lyrics-skip + null lyrical_themes downstream).
+    valence/acousticness have no Essentia equivalent and are left None.
+
+    Lyrics are NOT set here (crawled separately); lyrics_available stays False.
+    Schema violations propagate (ADR-002: hard failure at ingest).
+
+    Args:
+        audio_row: One row of audio_features.parquet — keys: track_id (int),
+            tempo_bpm, key, danceability, energy, genres, moods, instruments,
+            speechiness, instrumental.
+        fma_meta: FMA metadata for the track — title, artist, genre_top, duration_ms.
+
+    Returns:
+        Validated CatalogRecord.
+    """
+    def _f(v) -> float | None:
+        return None if v is None else float(v)
+
+    def _list(v) -> list[str]:
+        return [str(x) for x in v] if v is not None else []
+
+    track_id_int = int(audio_row["track_id"])
+    return CatalogRecord(
+        track_id=f"fma_{track_id_int:06d}",
+        title=str(fma_meta["title"]),
+        artist=str(fma_meta["artist"]),
+        genre_top=str(fma_meta.get("genre_top") or "Unknown"),
+        tempo=_f(audio_row.get("tempo_bpm")),
+        energy=_f(audio_row.get("energy")),
+        danceability=audio_row.get("danceability"),
+        key=audio_row.get("key"),
+        genres=_list(audio_row.get("genres")),
+        moods=_list(audio_row.get("moods")),
+        instruments=_list(audio_row.get("instruments")),
+        speechiness=_f(audio_row.get("speechiness")),
+        duration_ms=fma_meta.get("duration_ms"),
+        instrumental=bool(audio_row.get("instrumental", False)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint utilities
 # failure_modes.md §3.2 and §3.3
 # ADR-002: Parquet checkpointing every N tracks with atomic manifest

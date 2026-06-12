@@ -17,6 +17,7 @@ from typing import Iterator
 
 import httpx
 import pandas as pd
+from rapidfuzz import fuzz
 
 from src.data.schema import AppConfig
 
@@ -286,49 +287,124 @@ class GeniusClient:
         if not GENIUS_TOKEN:
             raise EnvironmentError("GENIUS_ACCESS_TOKEN must be set in .env")
 
-    async def get_lyrics(self, artist: str, title: str) -> str | None:
+    async def get_lyrics(
+        self, artist: str, title: str, client: httpx.AsyncClient | None = None
+    ) -> str | None:
         """Fetch raw lyrics for a track. Returns None on miss or API error.
 
-        Does NOT clean lyrics — cleaning is the responsibility of preprocess.py.
-        Two-step: search the Genius API for the track URL, then scrape the page.
+        Does NOT clean lyrics — cleaning is preprocess.py's job. Searches Genius,
+        then walks up to `pipeline.genius_max_results` hits, accepting the first
+        that BOTH passes the artist/title match guard AND has lyrics. Reuses an
+        injected client when given (batch crawl pools one connection).
         """
+        if client is None:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as own:
+                return await self._get_lyrics(artist, title, own)
+        return await self._get_lyrics(artist, title, client)
+
+    async def _get_lyrics(
+        self, artist: str, title: str, client: httpx.AsyncClient
+    ) -> str | None:
         headers = {"Authorization": f"Bearer {GENIUS_TOKEN}"}
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            # Step 1: Search for the track via the Genius API
+        # Step 1: search
+        search_response = await self._get_with_backoff(
+            client, f"{self._BASE_URL}/search", headers=headers, params={"q": f"{title} {artist}"}
+        )
+        if search_response is None:
+            return None
+        hits = search_response.json().get("response", {}).get("hits", [])
+        if not hits:
+            logger.debug("No Genius results for '%s' by '%s'", title, artist)
+            return None
+
+        # Step 2: walk hits with a per-hit match guard (failure_modes.md §1.1 — a
+        # blind fall-through to lower-ranked hits risks pulling a wrong song's lyrics).
+        max_results = self.config.pipeline.genius_max_results
+        for rank, hit in enumerate(hits[:max_results]):
+            if not self._validate_genius_hit(hit, artist, title):
+                continue
+            url = (hit.get("result") or {}).get("url")
+            if not url:
+                continue
+            page = await self._get_with_backoff(client, url, headers=headers)
+            if page is None:
+                continue   # timeout / 404 on this hit → try the next one
+            lyrics = self._extract_lyrics(page.text)
+            if lyrics:
+                if rank > 0:
+                    logger.info(
+                        "Genius fallback: rank %d hit used for '%s' by '%s'", rank, title, artist
+                    )
+                return lyrics
+
+        logger.debug("No usable Genius lyrics in top-%d for '%s' by '%s'", max_results, title, artist)
+        return None
+
+    def _validate_genius_hit(self, hit: dict, artist: str, title: str) -> bool:
+        """Guard: the Genius hit must fuzzily match the FMA (artist, title).
+
+        Prevents a fallback to lower-ranked results from silently grabbing a
+        different song's lyrics (the lyrics analog of failure_modes.md §1.1).
+        Reuses the catalog fuzzy thresholds.
+        """
+        result = hit.get("result") or {}
+        g_title = result.get("title") or ""
+        g_artist = (result.get("primary_artist") or {}).get("name") or ""
+        title_sim = fuzz.token_sort_ratio(title, g_title)
+        artist_sim = fuzz.token_sort_ratio(artist, g_artist)
+        ok = (
+            title_sim >= self.config.pipeline.fuzzy_match_threshold
+            and artist_sim >= self.config.pipeline.artist_match_threshold
+        )
+        if not ok:
+            logger.debug(
+                "Rejected Genius hit '%s' by '%s' (title=%.0f artist=%.0f) for '%s'/'%s'",
+                g_title, g_artist, title_sim, artist_sim, title, artist,
+            )
+        return ok
+
+    async def _get_with_backoff(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        headers: dict | None = None,
+        params: dict | None = None,
+    ) -> httpx.Response | None:
+        """GET with rate-limit backoff. 429 → wait (honoring Retry-After) and retry
+        the SAME request; timeout / other HTTP error → give up (caller advances).
+
+        The 429-vs-other split matters: treating a 429 like an empty result and
+        falling through to more requests makes the throttling worse.
+        """
+        max_retries = self.config.enrichment.max_retries
+        for attempt in range(max_retries):
             try:
-                search_response = await client.get(
-                    f"{self._BASE_URL}/search",
-                    headers=headers,
-                    params={"q": f"{title} {artist}"},
+                resp = await client.get(url, headers=headers, params=params)
+            except httpx.TimeoutException:
+                logger.warning("Genius request timeout for %s", url)
+                return None
+
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                delay = float(retry_after) if (retry_after and retry_after.isdigit()) else 2 ** attempt
+                logger.warning(
+                    "Genius 429 on %s — backoff %.0fs (attempt %d/%d)",
+                    url, delay, attempt + 1, max_retries,
                 )
-                search_response.raise_for_status()
-            except httpx.TimeoutException:
-                logger.warning("Genius search timeout for '%s' by '%s'", title, artist)
-                return None
-            except httpx.HTTPStatusError as e:
-                logger.warning("Genius search HTTP error for '%s' by '%s': %s", title, artist, e)
-                return None
+                await asyncio.sleep(delay)
+                continue
 
-            hits = search_response.json().get("response", {}).get("hits", [])
-            if not hits:
-                logger.debug("No Genius results for '%s' by '%s'", title, artist)
-                return None
-
-            lyrics_url = hits[0]["result"]["url"]
-
-            # Step 2: Scrape the lyrics page
             try:
-                page_response = await client.get(lyrics_url)
-                page_response.raise_for_status()
-            except httpx.TimeoutException:
-                logger.warning("Genius page timeout for %s", lyrics_url)
-                return None
+                resp.raise_for_status()
             except httpx.HTTPStatusError as e:
-                logger.warning("Genius page HTTP error for %s: %s", lyrics_url, e)
+                logger.warning("Genius HTTP error for %s: %s", url, e)
                 return None
+            return resp
 
-            return self._extract_lyrics(page_response.text)
+        logger.warning("Genius exhausted %d retries (429) for %s", max_retries, url)
+        return None
 
     def _extract_lyrics(self, html: str) -> str | None:
         """Extract raw lyrics text from a Genius HTML page.
@@ -368,21 +444,22 @@ class GeniusClient:
         """
         semaphore = asyncio.Semaphore(concurrency)
 
-        async def fetch_one(artist: str, title: str) -> tuple[str, str | None]:
-            key = f"{artist}|{title}"
-            async with semaphore:
-                try:
-                    lyrics = await self.get_lyrics(artist, title)
-                    return key, lyrics
-                except Exception as e:
-                    logger.warning(
-                        "Unexpected error fetching lyrics for '%s' by '%s': %s",
-                        title, artist, e,
-                    )
-                    return key, None
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async def fetch_one(artist: str, title: str) -> tuple[str, str | None]:
+                key = f"{artist}|{title}"
+                async with semaphore:
+                    try:
+                        lyrics = await self.get_lyrics(artist, title, client=client)
+                        return key, lyrics
+                    except Exception as e:
+                        logger.warning(
+                            "Unexpected error fetching lyrics for '%s' by '%s': %s",
+                            title, artist, e,
+                        )
+                        return key, None
 
-        tasks = [fetch_one(artist, title) for artist, title in tracks]
-        results = await asyncio.gather(*tasks)
+            tasks = [fetch_one(artist, title) for artist, title in tracks]
+            results = await asyncio.gather(*tasks)
 
         hit_count = sum(1 for _, v in results if v is not None)
         logger.info(

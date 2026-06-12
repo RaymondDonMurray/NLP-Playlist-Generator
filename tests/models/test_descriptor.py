@@ -62,6 +62,32 @@ class TestBuildPrompt:
         prompt = build_prompt(track)
         assert "unknown tempo" in prompt
         assert "unknown energy" in prompt
+        assert "unknown genres" in prompt   # empty Essentia lists → "unknown X"
+
+    def test_v3_renders_essentia_fields(self):
+        """Prompt v3 surfaces key, genres, moods, instruments, categorical danceability."""
+        track = CatalogRecord(
+            track_id="test_v3",
+            title="Test",
+            artist="Artist",
+            key="G minor",
+            danceability="danceable",
+            genres=["Electronic---Ambient"],
+            moods=["meditative", "Tender music"],
+            instruments=["synthesizer", "piano"],
+        )
+        prompt = build_prompt(track)
+        assert "G minor" in prompt
+        assert "Electronic---Ambient" in prompt
+        assert "meditative" in prompt and "synthesizer" in prompt
+        assert "danceable" in prompt
+
+    def test_v3_drops_valence_acousticness(self):
+        """v3 no longer mentions valence/acousticness (no Essentia equivalent)."""
+        track = CatalogRecord(track_id="t", title="T", artist="A")
+        prompt = build_prompt(track).lower()
+        assert "valence" not in prompt
+        assert "acousticness" not in prompt
 
 
 class TestExtractJson:

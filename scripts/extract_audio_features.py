@@ -166,6 +166,9 @@ def main() -> None:
             n_fail += 1
             continue
 
+        # Carry the HF `instrumental` flag (ClassLabel: 0=No, 1=Yes) — drives the
+        # downstream lyrics-skip + null lyrical_themes (adapter / build_catalog).
+        feats["instrumental"] = bool(record.get("instrumental"))
         batch_rows.append(feats)
         processed_ids.add(track_id)
         n_extracted += 1
