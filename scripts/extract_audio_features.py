@@ -36,6 +36,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+PROGRESS_LOG_EVERY = 50  # heartbeat interval (tracks) between checkpoint writes
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract Essentia audio features from FMA")
@@ -172,6 +174,13 @@ def main() -> None:
         batch_rows.append(feats)
         processed_ids.add(track_id)
         n_extracted += 1
+
+        # Periodic heartbeat between checkpoints so progress is visible.
+        if n_extracted % PROGRESS_LOG_EVERY == 0:
+            logger.info(
+                "Progress: %d extracted (%d failed, %d unresolved)",
+                n_extracted, n_fail, n_unresolved,
+            )
 
         if len(batch_rows) >= interval:
             flush()
