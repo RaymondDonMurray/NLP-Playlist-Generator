@@ -125,9 +125,10 @@ SPEECH_CLASSES = [
     "Speech synthesizer",
 ]
 # AudioSet music-mood subtree → moods-audioset.
+# NB: YAMNet exposes 521 of AudioSet's 527 classes — "Funny music" is among the
+# dropped ones, so it is intentionally excluded here (it would only warn + skip).
 AUDIOSET_MOOD_CLASSES = [
     "Happy music",
-    "Funny music",
     "Sad music",
     "Tender music",
     "Exciting music",
@@ -200,6 +201,16 @@ def _resolve_indices(labels: list[str], wanted: list[str]) -> list[tuple[int, st
 # Model download / cache
 # ---------------------------------------------------------------------------
 
+def _silence_essentia_warnings() -> None:
+    """Quiet Essentia's C++ warning logger. MonoLoader emits a benign
+    'No network created, or last created network has been deleted' warning once
+    per decoded track, which floods the extraction run. Idempotent.
+    """
+    import essentia
+
+    essentia.log.warningActive = False
+
+
 def load_audio_bytes(data: bytes, sample_rate: int, suffix: str = ".mp3") -> np.ndarray:
     """Decode raw (e.g. mp3) audio bytes to a mono float32 array at sample_rate.
 
@@ -209,6 +220,8 @@ def load_audio_bytes(data: bytes, sample_rate: int, suffix: str = ".mp3") -> np.
     file. essentia is imported lazily (heavy dependency, offline pipeline only).
     """
     import essentia.standard as es
+
+    _silence_essentia_warnings()
 
     tmp_path: str | None = None
     try:
@@ -260,6 +273,8 @@ class FeatureExtractors:
         logger.info("Loading Essentia models from %s (device=%s)", md, self.device)
 
         import essentia.standard as es  # lazy: heavy dependency, offline pipeline only
+
+        _silence_essentia_warnings()
 
         # Signal algorithms (CPU C++ DSP; no GPU path).
         self._rhythm = es.RhythmExtractor2013(method="multifeature")

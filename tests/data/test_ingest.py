@@ -150,3 +150,72 @@ class TestRateLimitBackoff:
         lyrics = await client.get_lyrics("Test Artist A", "Rainy Day Blues", client=http)
         assert lyrics is None
         assert http.get.call_count == 2  # both attempts 429, then give up
+
+    @pytest.mark.asyncio
+    async def test_429_long_retry_after_skips_immediately(self):
+        """A Retry-After beyond the cap → skip the track, don't sleep for an hour."""
+        cfg = AppConfig()
+        cfg.pipeline.genius_retry_after_cap_s = 60.0
+        client = GeniusClient(cfg)
+        http = _client(_resp(status=429, retry_after="3600"))  # 1 hour > 60s cap
+        lyrics = await client.get_lyrics("Test Artist A", "Rainy Day Blues", client=http)
+        assert lyrics is None
+        assert http.get.call_count == 1  # gave up on the first 429, no retry/sleep
+
+    @pytest.mark.asyncio
+    async def test_429_quota_exhausted_raises(self):
+        """remaining=0 is the daily quota being gone (not a short window) → raise
+        GeniusQuotaExceeded so the crawl aborts cleanly instead of skip-flooding."""
+        client = GeniusClient(AppConfig())
+        r = _resp(status=429)
+        r.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "42464"}
+        http = _client(r)
+        with pytest.raises(ingest.GeniusQuotaExceeded) as exc:
+            await client.get_lyrics("Test Artist A", "Rainy Day Blues", client=http)
+        assert exc.value.reset_s == 42464.0
+        assert http.get.call_count == 1  # no pointless retries against a blown quota
+
+    @pytest.mark.asyncio
+    async def test_quota_exhausted_propagates_through_batch(self):
+        """batch_get_lyrics must NOT swallow GeniusQuotaExceeded — it aborts the
+        whole batch so build_catalog can checkpoint and stop."""
+        client = GeniusClient(AppConfig())
+        r = _resp(status=429)
+        r.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "42464"}
+        client.get_lyrics = AsyncMock(side_effect=ingest.GeniusQuotaExceeded(42464.0))
+        with pytest.raises(ingest.GeniusQuotaExceeded):
+            await client.batch_get_lyrics([("Artist A", "Song A")], concurrency=2)
+
+    @pytest.mark.asyncio
+    async def test_429_no_retry_after_uses_reset_header(self, monkeypatch):
+        """When Retry-After is absent (Genius's actual behavior), the wait falls back
+        to x-ratelimit-reset; a reset beyond the cap skips rather than 1/2/4s spinning."""
+        cfg = AppConfig()
+        cfg.pipeline.genius_retry_after_cap_s = 900.0
+        client = GeniusClient(cfg)
+        r = _resp(status=429)  # no Retry-After, remaining>0 (short throttle), big reset
+        r.headers = {"x-ratelimit-remaining": "5", "x-ratelimit-reset": "3600"}
+        http = _client(r)
+        lyrics = await client.get_lyrics("Test Artist A", "Rainy Day Blues", client=http)
+        assert lyrics is None
+        assert http.get.call_count == 1  # 3600 > 900 cap → skip immediately, no spin
+
+    @pytest.mark.asyncio
+    async def test_429_within_cap_waits_then_retries_no_skip(self, monkeypatch):
+        """A normal ~8min window (under cap) pauses the crawl and retries — the
+        track is recovered, NOT skipped (the bug that was losing lyrics)."""
+        cfg = AppConfig()
+        cfg.pipeline.genius_retry_after_cap_s = 900.0  # 15 min
+        client = GeniusClient(cfg)
+
+        # Fake clock that jumps far forward each call so the shared pause elapses
+        # immediately; no-op sleep so no real wall-clock wait.
+        clock = {"t": 0.0}
+        monkeypatch.setattr(ingest.time, "monotonic", lambda: clock.__setitem__("t", clock["t"] + 1000.0) or clock["t"])
+        monkeypatch.setattr(ingest.asyncio, "sleep", AsyncMock())
+
+        search = _search(_hit("Rainy Day Blues", "Test Artist A", "http://x/0"))
+        http = _client(_resp(status=429, retry_after="468"), search, _resp(text=LYRICS_HTML))
+        lyrics = await client.get_lyrics("Test Artist A", "Rainy Day Blues", client=http)
+        assert lyrics is not None and "Walking in the rain" in lyrics
+        assert http.get.call_count == 3  # 429 (paused) + search-ok + page — recovered

@@ -349,7 +349,8 @@ def essentia_features_to_record(audio_row: dict, fma_meta: dict) -> CatalogRecor
         audio_row: One row of audio_features.parquet — keys: track_id (int),
             tempo_bpm, key, danceability, energy, genres, moods, instruments,
             speechiness, instrumental.
-        fma_meta: FMA metadata for the track — title, artist, genre_top, duration_ms.
+        fma_meta: FMA metadata for the track — title, artist, genre_top, duration_ms,
+            listens.
 
     Returns:
         Validated CatalogRecord.
@@ -366,6 +367,7 @@ def essentia_features_to_record(audio_row: dict, fma_meta: dict) -> CatalogRecor
         title=str(fma_meta["title"]),
         artist=str(fma_meta["artist"]),
         genre_top=str(fma_meta.get("genre_top") or "Unknown"),
+        listens=int(fma_meta.get("listens") or 0),
         tempo=_f(audio_row.get("tempo_bpm")),
         energy=_f(audio_row.get("energy")),
         danceability=audio_row.get("danceability"),

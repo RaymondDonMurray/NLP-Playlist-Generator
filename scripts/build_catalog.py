@@ -1,19 +1,21 @@
 """scripts/build_catalog.py
 
-Entry point: FMA + Spotify + Genius data pipeline → catalog.parquet + lyrics.parquet.
-scope.md §hourly timeline hours 1–6.
-ADR-002: Batch pipeline; strict Pydantic validation at ingest.
-ADR-006: Single config.yaml loaded at startup via Pydantic AppConfig.
+Entry point: FMA metadata + Essentia audio features + Genius lyrics → catalog.parquet
++ lyrics.parquet.
+ADR-002 (amended 2026-06-12): Batch pipeline; audio features sourced from Essentia
+(audio_features.parquet via extract_audio_features.py), replacing the EchoNest join.
+Strict Pydantic validation at ingest. ADR-006: single config.yaml at startup.
+
+Prereq: run scripts/extract_audio_features.py first to produce audio_features.parquet.
 
 Usage:
     python scripts/build_catalog.py --config config/config.yaml
     python scripts/build_catalog.py --config config/config.yaml --max-tracks 100
-    python scripts/build_catalog.py --config config/config.yaml --dry-run
+    python scripts/build_catalog.py --config config/config.yaml --skip-lyrics
 
 Outputs (written to config.paths.processed_dir):
-    catalog.parquet  — track metadata + audio features (no lyrics text, no descriptors)
+    catalog.parquet  — track metadata + Essentia features (no lyrics text, no descriptors)
     lyrics.parquet   — track_id + cleaned lyrics_text (joined by track_id)
-    suspicious_matches.csv — SUSPICIOUS fuzzy matches for manual review (failure_modes §1.1)
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -57,9 +60,19 @@ def parse_args() -> argparse.Namespace:
         help="Skip Genius lyrics crawl (faster; lyrics.parquet will be empty)",
     )
     parser.add_argument(
+        "--lyrics-sample",
+        type=int,
+        default=None,
+        help="Crawl in waves until M tracks actually HAVE lyrics, spread across the "
+             "listen-count range (most→least popular). Keeps trying regardless of the "
+             "Genius hit rate until M succeed or the catalog is exhausted. Omit to "
+             "crawl all vocal tracks once.",
+    )
+    parser.add_argument(
         "--skip-spotify",
         action="store_true",
-        help="Skip Spotify ID annotation (avoids rate limits; spotify_id not used in retrieval or eval)",
+        help="DEPRECATED no-op — Spotify ID annotation was removed in the Essentia pipeline "
+             "(ADR-002 amendment); spotify_id is no longer populated.",
     )
     return parser.parse_args()
 
@@ -89,25 +102,23 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 1: Load FMA metadata → fma_df
     # -----------------------------------------------------------------------
+    import numpy as np
     import pandas as pd
     from tqdm import tqdm
-    from src.data.ingest import FMAClient, SpotifyClient, GeniusClient
+    from src.data.ingest import FMAClient, GeniusClient, GeniusQuotaExceeded
     from src.data.preprocess import (
         clean_lyrics,
         dedup_catalog,
+        essentia_features_to_record,
         filter_non_music_tracks,
-        validate_catalog_record,
-        validate_audio_features,
-        validate_match,
     )
 
-    logger.info("Step 1/6 — Loading FMA metadata")
+    logger.info("Step 1/5 — Loading FMA metadata")
     fma_client = FMAClient(config)
     fma_records = list(fma_client.load_tracks())
 
-    if args.max_tracks:
-        fma_records = fma_records[: args.max_tracks]
-
+    # --max-tracks is applied later (Step 3, listens-aware) against tracks that
+    # actually survived the audio join — not as an arbitrary head slice here.
     fma_df = pd.DataFrame(fma_records)
     logger.info("Loaded %d English FMA tracks", len(fma_df))
 
@@ -116,162 +127,211 @@ def main() -> None:
         return
 
     # -----------------------------------------------------------------------
-    # Step 2: Join FMA audio features from echonest.csv (local, no API call)
-    #
-    # The Spotify audio-features endpoint (/v1/audio-features) was restricted
-    # for new apps in November 2024. FMA's echonest.csv provides identical
-    # features (tempo, energy, valence, acousticness, danceability, speechiness)
-    # for ~13K tracks, computed from the same EchoNest/Spotify technology.
+    # Step 2: Load Essentia audio features + join to FMA metadata
+    # ADR-002 amendment (2026-06-12): replaces the EchoNest join. Features come
+    # from scripts/extract_audio_features.py (audio_features.parquet), keyed by
+    # integer FMA track_id, lifting the 13K-track coverage ceiling to all of FMA.
     # -----------------------------------------------------------------------
-    logger.info("Step 2/6 — Loading FMA audio features from echonest.csv (local)")
-    features_df = fma_client.load_audio_features()
+    logger.info("Step 2/5 — Loading Essentia audio features + joining to FMA metadata")
+    audio_path = processed_dir / "audio_features.parquet"
+    if not audio_path.exists():
+        logger.error(
+            "audio_features.parquet not found at %s — run scripts/extract_audio_features.py first",
+            audio_path,
+        )
+        sys.exit(1)
 
-    # echonest.csv uses integer track_id; fma_df uses "fma_000002" strings
+    audio_df = pd.read_parquet(audio_path)
+    # audio_features uses integer track_id; fma_df uses "fma_000002" strings
     fma_df["track_num"] = fma_df["track_id"].apply(lambda tid: int(tid[4:]))
-    features_df.index = features_df.index.astype(int)
-
-    # Validate audio features before joining (failure_modes §1.3: sentinel values)
-    feature_cols = ["acousticness", "danceability", "energy", "speechiness", "tempo", "valence"]
-    for col in feature_cols:
-        if col in features_df.columns:
-            features_df[col] = features_df[col].apply(
-                lambda v, c=col: validate_audio_features({c: v}).get(c)
-            )
-
-    # Inner join: only keep tracks that have EchoNest audio features
-    matched_df = (
-        fma_df.set_index("track_num")
-        .join(features_df, how="inner")
-        .reset_index(drop=True)
+    fma_meta_cols = fma_df[["track_num", "title", "artist", "genre_top", "duration_ms", "listens"]]
+    merged_df = audio_df.merge(
+        fma_meta_cols, left_on="track_id", right_on="track_num", how="inner",
+        validate="many_to_one",  # each FMA track_num is unique; guards against dup metadata rows
     )
-    # Restore track_id column (was preserved through the join)
     logger.info(
-        "Audio feature join: %d/%d FMA tracks have EchoNest features",
-        len(matched_df), len(fma_df),
+        "Audio feature join: %d/%d extracted tracks matched FMA metadata",
+        len(merged_df), len(audio_df),
     )
-
-    if matched_df.empty:
-        logger.error("No tracks have EchoNest audio features — check echonest.csv")
+    if merged_df.empty:
+        logger.error("No extracted tracks matched FMA metadata — check track_id alignment")
         sys.exit(1)
 
     # -----------------------------------------------------------------------
-    # Step 3: Search Spotify for spotify_id (annotation only; no audio features)
-    #
-    # Spotify search still works fine. We use it purely to annotate tracks with
-    # their spotify_id for reference. Two-pass fuzzy validation prevents saving
-    # incorrect IDs (failure_modes §1.1).
+    # Step 3: Filter non-music + deduplicate, then build records via the adapter
+    # failure_modes §1.3: speechiness > max, duration < 30s. NOTE: the speechiness
+    # proxy is now AudioSet-derived and NOT EchoNest-calibrated — speechiness_max
+    # needs re-tuning (ADR-002 amendment); the filter mechanism is unchanged.
+    # CLAUDE.md: schema violations at ingest are hard failures (adapter raises).
     # -----------------------------------------------------------------------
-    matched_df["spotify_id"] = None  # populated below if --skip-spotify not set
+    logger.info("Step 3/5 — Filtering non-music tracks and deduplicating")
+    merged_df = filter_non_music_tracks(merged_df, config)
+    merged_df = dedup_catalog(merged_df)
 
-    if args.skip_spotify:
-        logger.info("Step 3/6 — Skipping Spotify ID annotation (--skip-spotify)")
-    else:
-        logger.info("Step 3/6 — Searching Spotify for spotify_id (reference annotation)")
-        spotify_client = SpotifyClient(config)
-        spotify_id_map: dict[str, str] = {}  # track_id → spotify_id (HIGH quality only)
-        spotify_suspicious: list[dict] = []
+    # --max-tracks is listens-aware: keep the N most-played tracks that survived the
+    # audio join + filtering, so a capped catalog is the popular core (easier eval
+    # labeling) rather than an arbitrary slice of FMA load order.
+    if args.max_tracks:
+        merged_df = merged_df.sort_values("listens", ascending=False).head(args.max_tracks)
+        logger.info("--max-tracks: kept top %d tracks by listens", len(merged_df))
 
-        for row in tqdm(matched_df.itertuples(), total=len(matched_df), desc="Spotify search", unit="track"):
-            result = spotify_client.search_track(row.artist, row.title)  # type: ignore[attr-defined]
-            if result is None:
-                continue
-            artists = result.get("artists") or []
-            spotify_title = result.get("name", "")
-            spotify_artist = artists[0].get("name", "") if artists else ""
-
-            quality = validate_match(
-                fma_title=row.title,  # type: ignore[attr-defined]
-                fma_artist=row.artist,  # type: ignore[attr-defined]
-                spotify_title=spotify_title,
-                spotify_artist=spotify_artist,
-                title_threshold=config.pipeline.fuzzy_match_threshold,
-                artist_high_threshold=config.pipeline.artist_match_threshold,
-                artist_suspicious_threshold=config.pipeline.suspicious_artist_threshold,
-            )
-            if quality == "high":
-                spotify_id_map[row.track_id] = result["id"]  # type: ignore[attr-defined]
-            elif quality == "suspicious":
-                spotify_suspicious.append({
-                    "track_id": row.track_id,  # type: ignore[attr-defined]
-                    "fma_title": row.title, "fma_artist": row.artist,  # type: ignore[attr-defined]
-                    "spotify_title": spotify_title, "spotify_artist": spotify_artist,
-                    "spotify_id": result["id"],
-                })
-
-        matched_df["spotify_id"] = matched_df["track_id"].map(spotify_id_map)
-        logger.info(
-            "Spotify annotation: %d HIGH, %d SUSPICIOUS, %d no match (out of %d tracks)",
-            len(spotify_id_map), len(spotify_suspicious),
-            len(matched_df) - len(spotify_id_map) - len(spotify_suspicious), len(matched_df),
-        )
-
-        if spotify_suspicious:
-            suspicious_path = processed_dir / "suspicious_matches.csv"
-            pd.DataFrame(spotify_suspicious).to_csv(suspicious_path, index=False)
-            logger.warning(
-                "MANUAL REVIEW REQUIRED: %d suspicious Spotify ID matches written to %s",
-                len(spotify_suspicious), suspicious_path,
-            )
-
-    # -----------------------------------------------------------------------
-    # Step 4: Filter non-music tracks + deduplicate
-    # failure_modes §1.3: speechiness > 0.5, duration < 30s
-    # scope.md §preprocessing step 4
-    # -----------------------------------------------------------------------
-    logger.info("Step 4/6 — Filtering non-music tracks and deduplicating")
-    matched_df = filter_non_music_tracks(matched_df, config)
-    matched_df = dedup_catalog(matched_df)
-
-    # -----------------------------------------------------------------------
-    # Validate every record as CatalogRecord (hard failure on schema violation)
-    # CLAUDE.md: Schema violations at ingest = hard failures — raise, don't continue
-    # -----------------------------------------------------------------------
-    logger.info("Validating %d records against CatalogRecord schema", len(matched_df))
+    logger.info("Building %d CatalogRecords via the Essentia adapter", len(merged_df))
     validated_records = []
-    for _, row in matched_df.iterrows():
-        record = validate_catalog_record(row.to_dict(), config)  # raises on schema violation
+    for _, row in merged_df.iterrows():
+        row_dict = row.to_dict()
+        # the merged row carries both audio-feature and FMA-metadata keys
+        record = essentia_features_to_record(row_dict, row_dict)  # raises on schema violation
         validated_records.append(record)
 
     catalog_df = pd.DataFrame([r.model_dump(exclude={"embedding", "lyrics_text"}) for r in validated_records])
     logger.info("Schema validation passed: %d clean catalog records", len(catalog_df))
 
     # -----------------------------------------------------------------------
-    # Step 6: Crawl Genius lyrics (async, concurrency=5)
-    # scope.md: ~5hr crawl for 5K tracks; 60-70% coverage on indie tracks
+    # Step 4: Crawl Genius lyrics (async) — skip instrumentals (HF flag)
+    # ADR-002 amendment: instrumental tracks skip the crawl entirely (saves time;
+    # hardens failure_modes §2.1 — no hallucinated themes for instrumentals).
+    # GeniusClient handles the guarded multi-result fallback + 429 backoff.
     # -----------------------------------------------------------------------
     lyrics_rows: list[dict] = []
+    lyrics_df = pd.DataFrame(columns=["track_id", "lyrics_text"])
+    lyrics_path = processed_dir / "lyrics.parquet"
 
     if args.skip_lyrics:
-        logger.info("Step 6/6 — Skipping lyrics crawl (--skip-lyrics)")
+        logger.info("Step 4/5 — Skipping lyrics crawl (--skip-lyrics)")
     else:
-        logger.info(
-            "Step 6/6 — Crawling Genius lyrics for %d tracks "
-            "(concurrency=5; this will take a while for large catalogs)",
-            len(validated_records),
-        )
+        vocal_records = [r for r in validated_records if not r.instrumental]
+        n_instrumental = len(validated_records) - len(vocal_records)
         genius_client = GeniusClient(config)
-        track_pairs = [(r.artist, r.title) for r in validated_records]
 
-        raw_lyrics_map = asyncio.run(
-            genius_client.batch_get_lyrics(track_pairs, concurrency=5)
-        )
+        def _persist_lyrics(rows: list[dict]) -> None:
+            """Atomically checkpoint accumulated lyrics to disk (deduped on track_id).
 
-        for record in tqdm(validated_records, desc="Cleaning lyrics", unit="track"):
-            key = f"{record.artist}|{record.title}"
-            raw = raw_lyrics_map.get(key)
-            if raw is None:
-                continue
-            cleaned = clean_lyrics(raw, min_tokens=config.pipeline.min_lyrics_tokens)
-            if cleaned is not None:
-                lyrics_rows.append({"track_id": record.track_id, "lyrics_text": cleaned})
+            Called after every crawl wave/chunk so an interrupted run (Ctrl-C, crash,
+            or a rate-limit window we choose not to wait out) resumes from here instead
+            of re-burning Genius quota from scratch — directly addressing the lost-lyrics
+            problem when we're merely hitting the API limit.
+            """
+            if not rows:
+                return
+            df = pd.DataFrame(rows).drop_duplicates(subset="track_id", keep="first")
+            tmp = lyrics_path.with_suffix(".parquet.tmp")
+            df.to_parquet(tmp, index=False)
+            os.replace(tmp, lyrics_path)
 
-        lyrics_df = pd.DataFrame(lyrics_rows) if lyrics_rows else pd.DataFrame(columns=["track_id", "lyrics_text"])
-        coverage = len(lyrics_rows) / len(validated_records) * 100 if validated_records else 0
-        logger.info("Lyrics coverage: %d/%d tracks (%.1f%%)", len(lyrics_rows), len(validated_records), coverage)
+        # Resume: reuse any lyrics already fetched in a prior (possibly interrupted)
+        # run so a restart never re-requests tracks we already have. This is what
+        # keeps a stop/restart from perpetually reopening the same 429 window.
+        done_ids: set[str] = set()
+        if lyrics_path.exists():
+            prior = pd.read_parquet(lyrics_path)
+            lyrics_rows.extend(prior[["track_id", "lyrics_text"]].to_dict("records"))
+            done_ids = set(prior["track_id"])
+            logger.info(
+                "Resuming lyrics crawl: %d tracks already have lyrics on disk (will be skipped)",
+                len(done_ids),
+            )
+        vocal_records = [r for r in vocal_records if r.track_id not in done_ids]
 
-        # Mark lyrics_available in catalog_df
+        def _crawl_and_clean(records: list) -> list[dict]:
+            """Crawl Genius for these records; return cleaned {track_id, lyrics_text} rows."""
+            pairs = [(r.artist, r.title) for r in records]
+            raw_map = asyncio.run(
+                genius_client.batch_get_lyrics(pairs, concurrency=config.pipeline.genius_concurrency)
+            )
+            rows: list[dict] = []
+            for rec in records:
+                raw = raw_map.get(f"{rec.artist}|{rec.title}")
+                if raw is None:
+                    continue
+                cleaned = clean_lyrics(raw, min_tokens=config.pipeline.min_lyrics_tokens)
+                if cleaned is not None:
+                    rows.append({"track_id": rec.track_id, "lyrics_text": cleaned})
+            return rows
+
+        if args.lyrics_sample is not None:
+            # Target M tracks that actually HAVE lyrics, spread across the listen-count
+            # range (most→least popular). Crawl in waves: each wave pulls a popularity-
+            # spread of not-yet-tried candidates sized to the remaining shortfall, so we
+            # keep going until M succeed (or the catalog is exhausted) regardless of the
+            # Genius hit rate. Misses in one wave are backfilled by the next.
+            target = args.lyrics_sample
+            ranked = sorted(vocal_records, key=lambda r: r.listens, reverse=True)
+            tried: set[str] = set()
+            logger.info(
+                "Step 4/5 — Crawling until %d tracks have lyrics, spread across %d vocal "
+                "tracks (%d instrumentals skipped)", target, len(ranked), n_instrumental,
+            )
+            wave = 0
+            while len(lyrics_rows) < target:
+                pool = [r for r in ranked if r.track_id not in tried]
+                if not pool:
+                    logger.warning(
+                        "Exhausted vocal catalog at %d/%d lyrics — Genius coverage too low "
+                        "to reach the target", len(lyrics_rows), target,
+                    )
+                    break
+                need = target - len(lyrics_rows)
+                k = min(len(pool), need)
+                picks = sorted({int(i) for i in np.linspace(0, len(pool) - 1, k).round()})
+                batch = [pool[i] for i in picks]
+                tried.update(r.track_id for r in batch)
+                wave += 1
+                try:
+                    new_rows = _crawl_and_clean(batch)
+                except GeniusQuotaExceeded as e:
+                    logger.error(
+                        "Stopping lyrics crawl — %s. %d lyrics checkpointed to %s; "
+                        "rerun after the reset to resume where this left off.",
+                        e, len(lyrics_rows), lyrics_path,
+                    )
+                    break
+                lyrics_rows.extend(new_rows)
+                _persist_lyrics(lyrics_rows)  # checkpoint each wave — interrupt-safe
+                logger.info(
+                    "  wave %d: crawled %d, +%d lyrics (%d/%d)",
+                    wave, len(batch), len(new_rows), len(lyrics_rows), target,
+                )
+        else:
+            logger.info(
+                "Step 4/5 — Crawling Genius lyrics for %d tracks (%d instrumentals skipped, "
+                "%d already done)", len(vocal_records), n_instrumental, len(done_ids),
+            )
+            # Chunk the full crawl so progress is checkpointed periodically rather than
+            # only at the very end — a Ctrl-C now costs at most one chunk, not everything.
+            chunk = config.pipeline.checkpoint_interval
+            for i in range(0, len(vocal_records), chunk):
+                batch = vocal_records[i : i + chunk]
+                try:
+                    new_rows = _crawl_and_clean(batch)
+                except GeniusQuotaExceeded as e:
+                    logger.error(
+                        "Stopping lyrics crawl — %s. %d lyrics checkpointed to %s; "
+                        "rerun after the reset to resume where this left off.",
+                        e, len(lyrics_rows), lyrics_path,
+                    )
+                    break
+                lyrics_rows.extend(new_rows)
+                _persist_lyrics(lyrics_rows)  # checkpoint each chunk — interrupt-safe
+                logger.info(
+                    "  crawled %d/%d, +%d lyrics (%d total)",
+                    min(i + chunk, len(vocal_records)), len(vocal_records),
+                    len(new_rows), len(lyrics_rows),
+                )
+
+        if lyrics_rows:
+            lyrics_df = pd.DataFrame(lyrics_rows).drop_duplicates(subset="track_id", keep="first")
+        logger.info("Lyrics obtained: %d tracks", len(lyrics_rows))
+
+    # Resolve lyrics_available from the authoritative lyrics.parquet on disk. On a
+    # --skip-lyrics rerun this reuses prior coverage instead of zeroing the flag;
+    # after a crawl it reflects the rows just written.
+    if args.skip_lyrics and lyrics_path.exists():
+        existing = pd.read_parquet(lyrics_path, columns=["track_id"])
+        tracks_with_lyrics = set(existing["track_id"])
+        logger.info("Reusing lyrics_available from existing %s (%d tracks)", lyrics_path, len(tracks_with_lyrics))
+    else:
         tracks_with_lyrics = set(lyrics_df["track_id"]) if not lyrics_df.empty else set()
-        catalog_df["lyrics_available"] = catalog_df["track_id"].isin(tracks_with_lyrics)
+    catalog_df["lyrics_available"] = catalog_df["track_id"].isin(tracks_with_lyrics)
 
     # -----------------------------------------------------------------------
     # Write outputs
@@ -282,7 +342,6 @@ def main() -> None:
     logger.info("Wrote %s (%d tracks)", catalog_path, len(catalog_df))
 
     if not args.skip_lyrics:
-        lyrics_path = processed_dir / "lyrics.parquet"
         lyrics_df.to_parquet(lyrics_path, index=False)
         logger.info("Wrote %s (%d tracks with lyrics)", lyrics_path, len(lyrics_df))
 

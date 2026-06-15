@@ -43,6 +43,7 @@ class CatalogRecord(BaseModel):
     title: str
     artist: str
     genre_top: str = "Unknown"
+    listens: int = 0    # FMA ('track','listens') play count; drives Novelty@k + lyrics sampling
 
     # Audio features. Numeric ones (tempo/energy/speechiness) are nullable; sentinels
     # nulled at ingest (failure_modes.md §1.3). The Essentia pipeline (ADR-002 amendment
@@ -348,6 +349,8 @@ class PipelineConfig(BaseModel):
     duration_ms_min: int = 30000
     dedup_similarity_threshold: float = 0.98
     genius_max_results: int = 3      # Genius fallback: try up to N search hits for lyrics
+    genius_concurrency: int = 2      # concurrent Genius requests (lower = less throttling)
+    genius_retry_after_cap_s: float = 900.0  # max single 429 wait honored (shared pause); longer → pathological ban, skip track
 
 
 class EnrichmentConfig(BaseModel):

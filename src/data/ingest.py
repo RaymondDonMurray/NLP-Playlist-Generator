@@ -12,6 +12,7 @@ import asyncio
 import html as html_module
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -22,6 +23,24 @@ from rapidfuzz import fuzz
 from src.data.schema import AppConfig
 
 logger = logging.getLogger(__name__)
+
+
+class GeniusQuotaExceeded(RuntimeError):
+    """The Genius *daily* request quota is exhausted (x-ratelimit-remaining=0).
+
+    Distinct from a short in-window throttle: nothing recovers this until the
+    daily counter resets (hours away), so the crawl aborts cleanly — progress is
+    checkpointed by the caller — rather than skip-flooding every remaining track
+    and burning further requests against an already-blown limit.
+    """
+
+    def __init__(self, reset_s: float | None = None) -> None:
+        self.reset_s = reset_s
+        msg = "Genius daily quota exhausted"
+        if reset_s:
+            msg += f"; resets in ~{reset_s / 3600:.1f}h"
+        super().__init__(msg)
+
 
 import os
 from dotenv import load_dotenv
@@ -84,6 +103,9 @@ class FMAClient:
                 n_skipped_missing += 1
                 continue
 
+            # Popularity signal — read non-fatally; absence means 0, never a skip.
+            listens = row.get(("track", "listens"))
+
             # scope.md: Restrict to English for MVP
             if pd.notna(language_code) and str(language_code) != "en":
                 n_skipped_lang += 1
@@ -96,6 +118,7 @@ class FMAClient:
                 "genre_top": str(genre_top).strip() if pd.notna(genre_top) else "Unknown",
                 # FMA stores duration in seconds; schema expects milliseconds
                 "duration_ms": int(float(duration_s) * 1000) if pd.notna(duration_s) else None,
+                "listens": int(listens) if pd.notna(listens) else 0,
             }
 
         logger.info(
@@ -286,6 +309,10 @@ class GeniusClient:
         self.config = config
         if not GENIUS_TOKEN:
             raise EnvironmentError("GENIUS_ACCESS_TOKEN must be set in .env")
+        # Shared rate-limit gate: a single 429 pauses the WHOLE crawl until the
+        # window clears, instead of each concurrent task independently skipping
+        # its track. monotonic deadline; 0.0 = not paused.
+        self._paused_until: float = 0.0
 
     async def get_lyrics(
         self, artist: str, title: str, client: httpx.AsyncClient | None = None
@@ -364,6 +391,23 @@ class GeniusClient:
             )
         return ok
 
+    async def _respect_rate_limit(self) -> None:
+        """Block until any crawl-wide rate-limit pause has elapsed.
+
+        Called before every request so that one task's 429 throttles ALL tasks,
+        not just itself. Sleeps in short slices so a pause extended by another
+        task mid-wait is picked up promptly.
+        """
+        while True:
+            remaining = self._paused_until - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, 5.0))
+
+    def _pause_crawl(self, seconds: float) -> None:
+        """Extend the shared pause deadline so all tasks wait out this window once."""
+        self._paused_until = max(self._paused_until, time.monotonic() + seconds)
+
     async def _get_with_backoff(
         self,
         client: httpx.AsyncClient,
@@ -372,14 +416,21 @@ class GeniusClient:
         headers: dict | None = None,
         params: dict | None = None,
     ) -> httpx.Response | None:
-        """GET with rate-limit backoff. 429 → wait (honoring Retry-After) and retry
-        the SAME request; timeout / other HTTP error → give up (caller advances).
+        """GET with crawl-wide rate-limit backoff. 429 → pause the whole crawl
+        (honoring Retry-After) and retry the SAME request; timeout / other HTTP
+        error → give up (caller advances to the next hit).
 
         The 429-vs-other split matters: treating a 429 like an empty result and
-        falling through to more requests makes the throttling worse.
+        falling through to more requests makes the throttling worse. Genius's
+        rate-limit window (~8 min) is a NORMAL recoverable throttle — we pause
+        the entire crawl on a shared timer and wait it out so no lyrics are lost.
+        Only a Retry-After beyond genius_retry_after_cap_s (a pathological,
+        multi-window ban) is treated as "give up on this track".
         """
         max_retries = self.config.enrichment.max_retries
+        cap = self.config.pipeline.genius_retry_after_cap_s
         for attempt in range(max_retries):
+            await self._respect_rate_limit()  # honor any crawl-wide pause first
             try:
                 resp = await client.get(url, headers=headers, params=params)
             except httpx.TimeoutException:
@@ -387,14 +438,35 @@ class GeniusClient:
                 return None
 
             if resp.status_code == 429:
+                # Daily quota gone (account-wide): no per-track skip helps — abort the
+                # whole crawl so the caller can checkpoint and resume after the reset.
+                if resp.headers.get("x-ratelimit-remaining") == "0":
+                    reset = resp.headers.get("x-ratelimit-reset")
+                    reset_s = float(reset) if reset and reset.isdigit() else None
+                    raise GeniusQuotaExceeded(reset_s)
+                # Short in-window throttle. Genius often omits Retry-After here, so fall
+                # back to x-ratelimit-reset, then to exponential backoff.
                 retry_after = resp.headers.get("Retry-After")
-                delay = float(retry_after) if (retry_after and retry_after.isdigit()) else 2 ** attempt
+                reset = resp.headers.get("x-ratelimit-reset")
+                if retry_after and retry_after.isdigit():
+                    wait = float(retry_after)
+                elif reset and reset.isdigit():
+                    wait = float(reset)
+                else:
+                    wait = float(min(2 ** attempt, cap))
+                if wait > cap:
+                    logger.warning(
+                        "Genius 429 on %s wants %.0fs (> cap %.0fs) — pathological ban, skipping track",
+                        url, wait, cap,
+                    )
+                    return None
+                self._pause_crawl(wait)
                 logger.warning(
-                    "Genius 429 on %s — backoff %.0fs (attempt %d/%d)",
-                    url, delay, attempt + 1, max_retries,
+                    "Genius 429 — pausing crawl %.0fs to wait out the rate-limit window "
+                    "(attempt %d/%d)",
+                    wait, attempt + 1, max_retries,
                 )
-                await asyncio.sleep(delay)
-                continue
+                continue  # _respect_rate_limit at the top of the loop does the sleeping
 
             try:
                 resp.raise_for_status()
@@ -451,6 +523,8 @@ class GeniusClient:
                     try:
                         lyrics = await self.get_lyrics(artist, title, client=client)
                         return key, lyrics
+                    except GeniusQuotaExceeded:
+                        raise  # daily quota gone — abort the whole batch, don't swallow
                     except Exception as e:
                         logger.warning(
                             "Unexpected error fetching lyrics for '%s' by '%s': %s",
