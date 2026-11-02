@@ -146,12 +146,6 @@ ChromaDB collections — one for lyrics-grounded tracks, one for metadata-only �
 mixing them would make it impossible to say cleanly whether lyrics grounding actually helps
 retrieval.
 
-**Fine-tuning infrastructure.** The plan (sketched out in `src/models/finetune.py`) is to
-fine-tune the bi-encoder with the `sentence-transformers` Trainer API, combining in-batch
-negatives with mined hard negatives (0.7/0.3 weighting), early-stopping on NDCG@10 rather than
-validation loss since loss can keep falling while retrieval quality plateaus. Not yet
-implemented — see [§9](#9-what-id-do-differently--future-work).
-
 **Experiment tracking.** TensorBoard, not MLflow or W&B — runs entirely locally, integrates
 natively with PyTorch, and needs no account setup. Skipped the embedding projector as more
 setup effort than the marginal insight it buys over the three tracked metric groups (training
@@ -170,43 +164,7 @@ tunable), the query falls back to the broader metadata-only index.
 
 ---
 
-## 4. The Spotify API deprecation pivot
-
-The original design pulled tempo, energy, valence, acousticness, and danceability straight
-from Spotify's `audio-features` endpoint via `spotipy`, fuzzy-joined against FMA on
-(artist, title). That endpoint was restricted for new API apps in November 2024, cutting this
-off before the project could lean on it (`SpotifyClient` is still in the codebase but unused).
-
-The fallback was FMA's bundled `echonest.csv` — a static, pre-computed feature table covering
-only 13,129 of FMA's 106,574 tracks. Joining against it drops over 93,000 tracks for lack of
-features, capping the catalog well below the original 3,000–5,000-track target.
-
-The actual fix was to extract audio features directly from raw audio using Essentia,
-streaming source audio from a HuggingFace mirror of FMA rather than downloading it in bulk.
-That meant:
-
-- Recovering a join key the HF dataset doesn't carry — matching each audio file back to its
-  FMA `track_id` via URL, with a filename fallback for the ~1% that don't match.
-- Building a small model registry around Essentia: classical DSP (tempo, key) plus three
-  TensorFlow model families — genre, mood, and instrument classifiers riding on Discogs-effnet
-  embeddings, and a YAMNet AudioSet pass supplying both a speechiness proxy and a mood signal.
-- Accepting a real schema change, not just a new source for the same fields — valence and
-  acousticness have no Essentia equivalent and are dropped from the descriptor prompt outright
-  rather than approximated; danceability becomes a binned category instead of a continuous
-  score; speechiness is re-derived from AudioSet speech-class probability mass, which means the
-  filtering threshold tuned for the old signal needs revisiting (see
-  [§9](#9-what-id-do-differently--future-work)).
-- Running extraction on CPU on Apple Silicon — Essentia's bundled TensorFlow build has no GPU
-  acceleration path on macOS, so scaling up further would lean on CPU parallelism across
-  machines rather than GPU offload.
-
-Net result: the coverage ceiling moved from ~13K to effectively all of FMA, at the cost of a
-schema migration and slower, CPU-bound extraction. The current 10,000-track catalog reflects
-this pipeline, not the original Spotify-based design.
-
----
-
-## 5. Failure modes & mitigations
+## 4. Failure modes & mitigations
 
 A few of the more concrete ones, out of a longer register kept in `docs/failure_modes.md`:
 
@@ -237,7 +195,7 @@ A few of the more concrete ones, out of a longer register kept in `docs/failure_
 
 ---
 
-## 6. Evaluation: results and honest caveats
+## 5. Evaluation: results and honest caveats
 
 The eval set is 10 hand-authored queries with self-labeled relevant tracks
 (`eval/queries.json`) — standard practice at this scale, but worth being upfront about, since
@@ -305,7 +263,7 @@ Reproduce with: `python scripts/run_eval.py --config config/config.yaml --print-
 
 ---
 
-## 7. Setup & usage
+## 6. Setup & usage
 
 ### Environment
 
@@ -367,7 +325,7 @@ pytest tests/ -v --cov=src --cov-report=term-missing
 
 ---
 
-## 8. Tech stack summary
+## 7. Tech stack summary
 
 | Component | Tool/library | Why chosen |
 |---|---|---|
@@ -384,39 +342,3 @@ pytest tests/ -v --cov=src --cov-report=term-missing
 | Fuzzy matching | rapidfuzz | Two-pass artist+title validation for the FMA↔Spotify/Genius joins |
 | Testing | pytest, pytest-asyncio | 153 tests across data/model/serving/eval layers |
 
----
-
-## 9. What I'd do differently / future work
-
-**Highest priority — a balanced label pool.** The single biggest gap in the current eval
-([§6](#6-evaluation-results-and-honest-caveats)) is that relevant-track labels were pooled
-from BM25 and dense candidates separately rather than judging the top-k of every retrieval
-config before scoring. That's the one piece of work that would let the ablation table make a
-clean claim rather than a bounded one.
-
-Other directions, roughly in the order I'd tackle them:
-
-- **Popularity debiasing** — inverse-popularity reweighting at retrieval time, measured
-  against before/after NDCG + Novelty@10. Currently blocked in practice by Novelty@10 being
-  uninformative at this catalog's popularity distribution ([§6](#6-evaluation-results-and-honest-caveats))
-  — would need to fix the popularity signal itself first.
-- **Contrastive fine-tuning of the bi-encoder** (`src/models/finetune.py` has the design
-  already sketched: sentence-transformers Trainer API, combined in-batch + hard-negative loss,
-  NDCG@10-based early stopping) — not yet implemented. A natural next step given bge-base was
-  chosen partly for its fine-tuning path.
-- **LLM query expansion** — expanding a query like "chill rainy jazz" toward "slow tempo,
-  minor key, acoustic piano-led jazz, Bill Evans, Kind of Blue adjacent" before embedding, and
-  measuring the retrieval delta as a fifth ablation config.
-- **A lightweight web UI** and **a deployed endpoint** — both natural extensions once the
-  retrieval/reranking core is stable; not built yet because the CLI was enough to validate the
-  architecture end to end.
-- **MLflow experiment tracking** and **CI/CD** (test + eval-regression jobs, gated on the
-  regression threshold already present in `config.yaml` but not wired to a CI job).
-- **Increasing lyrics coverage.** 194/10,000 tracks with usable lyrics is thin enough that the
-  dual-index architecture's core hypothesis (does lyrics-grounding improve retrieval?) can't
-  currently be tested properly. Worth investigating whether a broader lyrics source closes
-  this gap meaningfully on an indie/Creative-Commons catalog like FMA, versus accepting that
-  metadata-only enrichment is this catalog's practical ceiling.
-- **Re-tuning Essentia-derived thresholds against ground truth.** `speechiness_max` is still
-  inherited from the old Spotify/EchoNest-calibrated era and hasn't been re-validated against
-  the AudioSet-derived speechiness proxy introduced by the Essentia pivot.
